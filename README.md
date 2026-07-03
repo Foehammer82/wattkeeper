@@ -9,7 +9,6 @@ Small Raspberry Pi nodes run NUT near the hardware, automatically detect USB UPS
 This repository is currently in the planning and scaffolding stage.
 
 - [ROADMAP.md](ROADMAP.md) defines the architecture, phases, and exit criteria.
-- [PROMPTS.md](PROMPTS.md) contains implementation prompts aligned to each roadmap phase.
 - [.github/copilot-instructions.md](.github/copilot-instructions.md) captures project-specific coding guidance for Copilot sessions in this repo.
 
 ## Goals
@@ -54,8 +53,7 @@ When implementing code in this repository:
 If you are starting work from scratch:
 
 1. Read [ROADMAP.md](ROADMAP.md) for the intended architecture and constraints.
-2. Use the matching phase prompt from [PROMPTS.md](PROMPTS.md).
-3. Implement only the requested phase unless a small prerequisite is needed to keep the repo buildable.
+2. Implement only the requested phase unless a small prerequisite is needed to keep the repo buildable.
 
 ## License
 

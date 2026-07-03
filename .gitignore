@@ -1,0 +1,40 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and local env files
+*.log
+.env
+.env.*
+
+# Go build and test outputs
+bin/
+dist/
+cover.out
+coverage.out
+*.coverprofile
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go workspace artifacts
+go.work.sum
+
+# Frontend and package manager outputs
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Generated archives and image artifacts
+*.img
+*.img.xz
+*.zip
+*.tar
+*.tar.gz
+*.tgz
