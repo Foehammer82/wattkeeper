@@ -35,6 +35,7 @@ pnpm-debug.log*
 # Generated archives and image artifacts
 *.img
 *.img.xz
+*.img*
 *.zip
 *.tar
 *.tar.gz
