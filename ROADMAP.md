@@ -150,6 +150,9 @@ automatically with correct device grouping, controls work.
       operational model, and current capabilities rather than planned work
 - [ ] Add or refresh end-user and operator documentation for installation,
       adoption, upgrades, backup/restore, and recovery flows
+- [ ] Remove or consolidate `.github/` prompts and skills that were only
+      needed to complete roadmap implementation work, keeping only the
+      customization assets still useful for ongoing maintenance
 - [ ] Remove completed or superseded planning details from `ROADMAP.md` once
       the project has fully shipped and the roadmap is no longer the source of
       truth
