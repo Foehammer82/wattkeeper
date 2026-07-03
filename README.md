@@ -6,7 +6,7 @@ Small Raspberry Pi nodes run NUT near the hardware, automatically detect USB UPS
 
 ## Status
 
-This repository is currently in the planning and scaffolding stage.
+This repository now ships the Phase 1 node agent and the Phase 2 flashable image pipeline. The controller and Home Assistant bridge phases are still ahead.
 
 - [ROADMAP.md](ROADMAP.md) defines the architecture, phases, and exit criteria.
 - [.github/copilot-instructions.md](.github/copilot-instructions.md) captures project-specific coding guidance for Copilot sessions in this repo.
@@ -62,19 +62,30 @@ If you are starting work from scratch:
 
 ## Releases Today
 
-This repository does not produce a flashable image yet. Phase 2 image work is still pending, and `make image` is not implemented.
-
-What it does produce today is versioned agent release artifacts:
+This repository now produces both versioned agent release artifacts and a flashable Raspberry Pi OS Lite image for Wattkeeper nodes:
 
 1. Create and push a SemVer-style tag such as `v0.1.0` for a normal release or `v0.1.0-rc1` for a prerelease.
 2. GitHub Actions runs `.github/workflows/release.yml`.
-3. The workflow runs tests, builds the agent for `linux/arm64` and `linux/armv6`, packages each archive with the install assets from `deploy/`, and publishes them to the GitHub Release for that tag.
+3. The workflow runs tests, builds the agent for `linux/arm64` and `linux/armv6`, packages each archive with the install assets from `deploy/`, builds the `wattkeeper-node-<version>.img.xz` image through pi-gen, and publishes all artifacts to the GitHub Release for that tag.
 
 You can build the same release payload locally with:
 
 ```sh
 make release-agent VERSION=v0.1.0
+make image VERSION=v0.1.0
 ```
+
+Image build prerequisites and the flash workflow are documented in [image/README.md](image/README.md).
+
+## Local Validation
+
+When working on the image pipeline or the Pi provisioning flow, validate locally before pushing:
+
+1. Run `make image VERSION=v0.1.0-rc1` from the repo root and wait for `dist/wattkeeper-node-<version>.img.xz` plus its `.sha256` file.
+2. If a pi-gen run fails after creating the `pigen_work` container and you want to resume the same build state while iterating on the custom stage, rerun with `CONTINUE=1 make image VERSION=v0.1.0-rc1`.
+3. Flash the resulting image with Raspberry Pi Imager, set WiFi and SSH keys in the Imager customization dialog, then boot a Pi Zero 2 W.
+4. Plug in a USB UPS and verify the first-boot path end to end: hostname becomes `wkeeper-node-<last4 serial>`, `/var/lib/wattkeeper` exists, the node advertises `_wattkeeper._tcp`, and `upsc <name>@<pi-ip>` works from another machine.
+5. Treat CI as the release gate, but use the local path for day-to-day iteration so image and first-boot regressions are caught before tagging or pushing.
 
 ## Contributing
 

@@ -25,11 +25,18 @@ jobs:
         with:
           go-version-file: go.work
 
+      - name: Enable QEMU for pi-gen
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Test
         run: make test
 
       - name: Build release artifacts
-        run: make release-agent VERSION=${{ github.ref_name }}
+        run: |
+          make release-agent VERSION=${{ github.ref_name }}
+          make image VERSION=${{ github.ref_name }}
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -39,3 +46,5 @@ jobs:
           files: |
             dist/release/*.tar.gz
             dist/release/SHA256SUMS
+            dist/*.img.xz
+            dist/*.img.xz.sha256

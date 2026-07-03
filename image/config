@@ -1,0 +1,11 @@
+IMG_NAME='wattkeeper-node'
+PI_GEN_RELEASE='Wattkeeper Node'
+RELEASE='bookworm'
+ARCH='arm64'
+ENABLE_SSH='1'
+DEPLOY_COMPRESSION='xz'
+COMPRESSION_LEVEL='6'
+TARGET_HOSTNAME='wkeeper-node'
+ENABLE_CLOUD_INIT='0'
+WATTKEEPER_STAGE_DIR="${WATTKEEPER_STAGE_DIR:-../workspace/stage-wattkeeper}"
+STAGE_LIST="stage0 stage1 stage2 ${WATTKEEPER_STAGE_DIR}"

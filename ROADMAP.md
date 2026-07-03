@@ -10,7 +10,7 @@ everything to Home Assistant.
 
 ## Repo layout (monorepo)
 
-```
+```text
 wattkeeper/
 ├── ROADMAP.md
 ├── .github/
@@ -79,21 +79,28 @@ the node shows up in `avahi-browse _wattkeeper._tcp`.
 
 Goal: one `.img` file. Flash, boot, done.
 
-- [ ] pi-gen custom stage: installs `nut`, agent binary, systemd units,
+- [x] pi-gen custom stage: installs `nut`, agent binary, systemd units,
       udev rules; disables unneeded services; enables SSH with key-only auth
       (key injected at flash time via bootfs, same mechanism as Pi Imager)
-- [ ] First-boot script: expand filesystem, generate per-device NUT runtime
+- [x] First-boot script: expand filesystem, generate per-device NUT runtime
       dirs, hostname = `wkeeper-node-<last4 of serial>`
-- [ ] WiFi provisioning: support standard `custom.toml` / Pi Imager style
+- [x] WiFi provisioning: support standard `custom.toml` / Pi Imager style
       config on the boot partition so users set WiFi creds at flash time
       without touching the rootfs
-- [ ] `make image` target that runs pi-gen in Docker and drops
+- [x] `make image` target that runs pi-gen in Docker and drops
       `wattkeeper-node-vX.Y.Z.img.xz` in `dist/`
-- [ ] CI job to build image on tag
+- [x] CI job to build image on tag
 
 **Exit criteria**: flash image with Pi Imager (WiFi + SSH key set in imager),
 boot Pi, plug in UPS, node is discoverable and serving NUT with no SSH session
 ever opened.
+
+While iterating on Phase 2 work locally, validate with this sequence before pushing:
+
+1. Run `make image VERSION=<dev-or-rc-tag>` and confirm it emits `dist/wattkeeper-node-<version>.img.xz` and the matching `.sha256` file.
+2. If a pi-gen run fails mid-build and you are refining the custom stage, use `CONTINUE=1 make image VERSION=<same-tag>` to resume from the preserved `pigen_work` container instead of starting from scratch.
+3. Flash the image with Raspberry Pi Imager using WiFi and SSH-key customization, then boot a real Pi Zero 2 W with a USB UPS attached.
+4. Verify the Phase 2 exit behavior on hardware: first-boot hostname rewrite, `/var/lib/wattkeeper` creation, mDNS advertisement, and remote NUT access via `upsc`.
 
 ## Phase 3 — Controller: discovery + adoption
 

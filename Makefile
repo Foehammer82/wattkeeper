@@ -34,5 +34,8 @@ lint:
 	cd agent && golangci-lint run ./...
 	cd controller && golangci-lint run ./...
 
-image sim-up sim-down:
+image: agent
+	./image/build.sh "$(VERSION)"
+
+sim-up sim-down:
 	@echo not implemented
