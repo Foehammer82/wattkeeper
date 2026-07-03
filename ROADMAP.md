@@ -37,20 +37,20 @@ wattkeeper/
 
 ## Phase 0 — Repo scaffold
 
-- [ ] Init repo, Go workspace (`go.work`) covering `agent/` and `controller/`
-- [ ] Top-level Makefile: `make agent`, `make image`, `make sim-up`, `make test`
+- [x] Init repo, Go workspace (`go.work`) covering `agent/` and `controller/`
+- [x] Top-level Makefile: `make agent`, `make image`, `make sim-up`, `make test`
 - [ ] CI stub (GitHub Actions): lint + test on push, cross-compile agent for
       `linux/arm64` (Zero 2 W is 64-bit capable) and `linux/arm` (fallback)
-- [ ] `.editorconfig`, `gofmt`/`golangci-lint` config
+- [x] `.editorconfig`, `gofmt`/`golangci-lint` config
 
 ## Phase 1 — Node agent MVP
 
 Goal: plug any USB UPS into a Pi running the agent and it appears as a working
 NUT netserver with zero manual config, discoverable on the LAN.
 
-- [ ] **Hotplug watcher**: subscribe to udev events (netlink) for USB
+- [x] **Hotplug watcher**: subscribe to udev events (netlink) for USB
       add/remove; debounce (UPSes enumerate noisily)
-- [ ] **Scanner**: shell out to `nut-scanner -U` on boot and on hotplug events;
+- [x] **Scanner**: shell out to `nut-scanner -U` on boot and on hotplug events;
       parse output into structs (driver, port, vendorid, productid, serial)
 - [ ] **Config generation**: render `/etc/nut/ups.conf` from scan results.
       Stable UPS naming: derive from serial number so names survive reboots
@@ -139,6 +139,19 @@ automatically with correct device grouping, controls work.
 - [ ] Backup/restore of controller DB
 - [ ] Read-only rootfs or overlayfs on nodes to survive SD card abuse
 - [ ] Multi-UPS-per-node support verification (USB hub on a 3A+ etc.)
+
+## Phase 6 — Documentation & roadmap closeout
+
+- [ ] Update `README.md` so it reflects the shipped architecture, setup flow,
+      operational model, and current capabilities rather than planned work
+- [ ] Add or refresh end-user and operator documentation for installation,
+      adoption, upgrades, backup/restore, and recovery flows
+- [ ] Remove completed or superseded planning details from `ROADMAP.md` once
+      the project has fully shipped and the roadmap is no longer the source of
+      truth
+- [ ] Delete `ROADMAP.md` after all roadmap phases are complete and its final
+      documentation has been incorporated into `README.md` and any permanent
+      docs
 
 ## Stretch — Virtual test rig (`sim/`)
 
