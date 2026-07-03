@@ -77,6 +77,21 @@ make image VERSION=v0.1.0
 
 Image build prerequisites and the flash workflow are documented in [image/README.md](image/README.md).
 
+## Likely Compatible Pi Models
+
+The current node image is built as a 64-bit Raspberry Pi OS Lite image for `arm64`, so it is most likely to work on 64-bit-capable Raspberry Pi boards including:
+
+- Pi Zero 2 W
+- Pi 3 Model B and B+
+- Pi 4 Model B
+- Pi 5
+- Raspberry Pi 400
+- Compute Module 4
+
+The Pi Zero 2 W is the primary validated target today. Other `arm64` Raspberry Pi models should be good candidates, but they are not yet called out as explicitly hardware-validated in this repo.
+
+Older 32-bit-only boards such as the original Pi Zero W are not expected to work with the current image as built.
+
 ## Local Validation
 
 When working on the image pipeline or the Pi provisioning flow, validate locally before pushing:
