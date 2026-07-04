@@ -160,6 +160,9 @@ automatically with correct device grouping, controls work.
 - [ ] Remove or consolidate `.github/` prompts and skills that were only
       needed to complete roadmap implementation work, keeping only the
       customization assets still useful for ongoing maintenance
+- [ ] Refresh `CONTRIBUTING.md` so it remains the contributor guide after
+      roadmap-driven development ends, removing references that assume
+      `ROADMAP.md` still exists
 - [ ] Remove completed or superseded planning details from `ROADMAP.md` once
       the project has fully shipped and the roadmap is no longer the source of
       truth

@@ -8,6 +8,31 @@ indent_style = space
 indent_size = 2
 trim_trailing_whitespace = true
 
+[*.{sh,service,rules}]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
 [Makefile]
+end_of_line = lf
 indent_style = tab
 trim_trailing_whitespace = false
+
+[image/config]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
+[image/stage-wattkeeper/00-packages/00-packages]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true

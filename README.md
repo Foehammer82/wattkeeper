@@ -105,6 +105,7 @@ When working on the image pipeline or the Pi provisioning flow, validate locally
 ## Contributing
 
 Contributor workflow, release policy, RC handling, and GitHub Actions limit guidance live in [CONTRIBUTING.md](CONTRIBUTING.md).
+Community expectations and reporting guidance live in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 

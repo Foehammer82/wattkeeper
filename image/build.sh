@@ -8,7 +8,7 @@ DIST_DIR="$REPO_ROOT/dist"
 AGENT_SOURCE="$DIST_DIR/wattkeeper-agent-linux-arm64"
 IMAGE_OUTPUT="$DIST_DIR/wattkeeper-node-$VERSION.img.xz"
 CHECKSUM_OUTPUT="$IMAGE_OUTPUT.sha256"
-PI_GEN_REF=${PI_GEN_REF:-arm64}
+PI_GEN_REF=${PI_GEN_REF:-bookworm-arm64}
 TMP_PARENT=${TMPDIR:-/tmp}
 QEMU_BIN=''
 QEMU_HINT=''
@@ -20,6 +20,22 @@ require_command() {
 		echo "missing required command: $1" >&2
 		exit 1
 	fi
+}
+
+require_docker() {
+	require_command docker
+
+	if docker version >/dev/null 2>&1; then
+		return
+	fi
+
+	docker_error=$(docker version 2>&1 || true)
+	echo "docker is installed but not usable from this shell" >&2
+	if [ -n "$docker_error" ]; then
+		printf '%s\n' "$docker_error" >&2
+	fi
+	echo "enable Docker Desktop WSL integration for this distro or install a working Docker engine" >&2
+	exit 1
 }
 
 resolve_qemu() {
@@ -43,7 +59,10 @@ ensure_binfmt() {
 	fi
 
 	echo "qemu-aarch64 binfmt is not registered; attempting Docker-based registration..."
-	if ! docker run --privileged --rm "$BINFMT_HELPER_IMAGE" --install arm64 >/dev/null; then
+	if ! docker_output=$(docker run --privileged --rm "$BINFMT_HELPER_IMAGE" --install arm64 2>&1); then
+		if [ -n "$docker_output" ]; then
+			printf '%s\n' "$docker_output" >&2
+		fi
 		echo "failed to register qemu-aarch64 via Docker; install qemu-user-binfmt or enable binfmt_misc on the host" >&2
 		exit 1
 	fi
@@ -79,9 +98,10 @@ extract_qemu_from_docker() {
 	fi
 	docker rm -f "$container_name" >/dev/null 2>&1 || true
 	chmod 0755 "$BIN_DIR/qemu-aarch64"
+	ln -sf "$BIN_DIR/qemu-aarch64" "$BIN_DIR/qemu-aarch64-static"
 }
 
-require_command docker
+require_docker
 require_command git
 require_command install
 require_command mktemp
@@ -120,6 +140,7 @@ cp -R "$SCRIPT_DIR/stage-wattkeeper" "$STAGE_DIR"
 
 if [ "$QEMU_HINT" = 'static' ]; then
 	ln -sf "$QEMU_BIN" "$BIN_DIR/qemu-aarch64"
+	ln -sf "$QEMU_BIN" "$BIN_DIR/qemu-aarch64-static"
 	QEMU_PATH_PREFIX="$BIN_DIR:$PATH"
 elif [ "$QEMU_HINT" = 'docker' ]; then
 	extract_qemu_from_docker

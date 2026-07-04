@@ -25,4 +25,5 @@ This directory contains workspace Copilot prompt files for roadmap-driven work i
 
 - Add a new prompt when a workflow is a repeatable, single-purpose slash command.
 - Update existing prompts when roadmap scope changes.
-- Keep this directory, [.github/skills/](../skills), [.github/copilot-instructions.md](../copilot-instructions.md), [README.md](../../README.md), and [ROADMAP.md](../../ROADMAP.md) aligned.
+- Keep this directory, [.github/skills/](../skills), [.github/copilot-instructions.md](../copilot-instructions.md), [README.md](../../README.md), [ROADMAP.md](../../ROADMAP.md), and [CONTRIBUTING.md](../../CONTRIBUTING.md) aligned during roadmap-driven development.
+- After all roadmap phases are complete and `ROADMAP.md` is deleted, refresh this README and [CONTRIBUTING.md](../../CONTRIBUTING.md) so they no longer point contributors at roadmap-only workflow.
