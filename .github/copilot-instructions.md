@@ -31,6 +31,7 @@ This repository is the `wattkeeper` monorepo. Read `ROADMAP.md` before making no
 - Keep Linux and Debian bookworm behavior in mind for any service management, file paths, systemd integration, or NUT interactions.
 - Avoid cgo unless the roadmap explicitly justifies it. Pure Go solutions are preferred, especially for agent-side hardware/event handling.
 - Use stable, deterministic rendering for generated text files so config diffs are predictable and easy to test.
+- Keep the docs visual theme aligned with the app's current UI direction. When node or controller UI colors, tone, or surface styling change materially, update the MkDocs theme/assets in the same change or note the mismatch explicitly.
 - When implementing parsers or text renderers, write table-driven tests with realistic fixtures. This is required for scanner parsing, config generation, protocol parsing, and similar text-heavy behavior.
 - For hardware-dependent code, isolate shelling out, filesystem access, clocks, and service control behind small interfaces when practical so tests can fake them.
 - When a feature interacts with NUT, udev, mDNS, SQLite, MQTT, or TLS, follow the roadmap's explicit constraints before inventing new behavior.

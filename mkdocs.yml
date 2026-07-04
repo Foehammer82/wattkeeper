@@ -13,15 +13,11 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: teal
-      accent: lime
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: teal
-      accent: lime
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
@@ -47,6 +43,8 @@ plugins:
       fallback_to_build_date: true
       exclude:
         - index.md
+extra_css:
+  - assets/theme.css
 nav:
   - Home: index.md
   - Getting Started: getting-started.md

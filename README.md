@@ -115,6 +115,7 @@ For the current user-facing path, start with:
 
 Contributor workflow, release policy, RC handling, and GitHub Actions limit guidance live in [CONTRIBUTING.md](CONTRIBUTING.md).
 Community expectations and reporting guidance live in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Security vulnerability reporting guidance lives in [SECURITY.md](SECURITY.md).
 
 ## License
 
