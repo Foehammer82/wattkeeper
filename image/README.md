@@ -49,6 +49,8 @@ The user-facing flow for building, flashing, and validating a node image now liv
 
 The image relies on Raspberry Pi OS first boot for filesystem expansion. Wattkeeper adds a separate oneshot service that:
 
+- suppresses the Raspberry Pi OS first-user creation flow by shipping a pre-created `wattkeeper` account
+- locks that account password on first boot so password login is not part of the standard workflow
 - sets the hostname to `wkeeper-node-<last4 serial>`
 - creates `/var/lib/wattkeeper`
 - records completion and disables itself
@@ -60,4 +62,4 @@ This service does not replace or overwrite Raspberry Pi Imager's boot partition 
 - No WiFi credentials are baked into the image.
 - No SSH authorized keys are baked into the image.
 - No NUT passwords or controller credentials are baked into the image.
-- SSH is enabled in the base image; use Pi Imager to inject keys and apply its standard SSH hardening at flash time.
+- SSH is enabled in the base image, but password authentication is disabled; use Pi Imager to inject public keys for the `wattkeeper` user if you need shell access.

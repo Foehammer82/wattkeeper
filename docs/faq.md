@@ -20,6 +20,14 @@ The current image is built for `arm64`. Pi Zero 2 W is the main target. Other 64
 
 No. WiFi and SSH customization are expected to be injected at flash time through Raspberry Pi Imager.
 
+## Will the image ask me to create a username or password on first boot?
+
+No. The image now ships with a pre-created `wattkeeper` account so the Pi boots directly into the Wattkeeper flow without first-user setup prompts.
+
+## Can I log in over SSH with a password?
+
+No. SSH password authentication is disabled. If you want shell access, inject a public key with Raspberry Pi Imager and connect as `wattkeeper`.
+
 ## Can I use the current release without a controller?
 
 Yes. The current release is useful as a node image that discovers a UPS, configures NUT locally, and exposes it on the network.

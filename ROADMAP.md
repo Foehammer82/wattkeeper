@@ -66,8 +66,8 @@ NUT netserver with zero manual config, discoverable on the LAN.
       (hash compare)
 - [x] **mDNS advertise**: `_wattkeeper._tcp.local` with TXT records:
       `id=<pi-serial>`, `adopted=false`, `ups_count=N`, `version=X`
-- [x] **Agent health endpoint**: `GET /healthz` on :8080 — agent version,
-      UPS list, NUT driver status, CPU temp, uptime
+- [x] **Agent node HTTP surface**: local dashboard on `/`, minimal public
+      `GET /status`, and detailed `GET /healthz` on :80
 - [x] Systemd unit + udev rule files in `deploy/`
 - [x] Unit tests: scanner output parsing, config rendering, name stability
 
@@ -146,6 +146,25 @@ automatically with correct device grouping, controls work.
 
 - [ ] Agent OTA updates pushed from controller (signed binaries)
 - [ ] Node factory-reset flow (GPIO jumper or boot-partition flag file)
+- [ ] Node HTTP auth bootstrap: first browser client to reach an uninitialized
+      node must create the local admin username/password; after bootstrap, the
+      node dashboard and detailed node APIs such as `GET /status/details`
+      and `GET /healthz` require authentication via a node-local session flow
+- [ ] Node HTTP surface hardening: keep unauthenticated `GET /status` limited
+      to basic aggregate state suitable for discovery and quick checks; avoid
+      stable UPS identifiers and detailed node metrics there, and keep richer
+      diagnostics behind the authenticated node UI or controller-trusted APIs
+- [ ] Insecure node UI bypass policy: keep `--http-auth=false` as an explicit
+      local-development escape hatch only; do not enable it in image defaults,
+      packaged service units, or controller-managed production policy
+- [ ] Session and form hardening for node-local auth: review CSRF protection,
+      cookie security attributes under TLS, session expiration/rotation, and
+      the exact contract for non-browser authenticated clients
+- [ ] Controller-managed node UI policy: let the controller drive the node's
+      local UI enabled/disabled state through the same policy surface that
+      backs the node settings page, with a documented local override/reset
+- [ ] Controller-managed node UI policy: after adoption, the controller can
+      enable or disable each node's local web UI and related local-auth access
 - [ ] Battery health trending / replace-by estimates from runtime decay
 - [ ] Backup/restore of controller DB
 - [ ] Read-only rootfs or overlayfs on nodes to survive SD card abuse

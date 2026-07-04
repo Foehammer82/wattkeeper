@@ -1,0 +1,444 @@
+package api
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	defaultAuthPath   = "/var/lib/wattkeeper/webui-auth.json"
+	defaultSessionTTL = 12 * time.Hour
+	sessionCookieName = "wattkeeper_session"
+)
+
+var (
+	errAuthDisabled          = errors.New("node web auth disabled")
+	errAuthNotConfigured     = errors.New("node web auth not initialized")
+	errAuthAlreadyConfigured = errors.New("node web auth already initialized")
+	errInvalidCredentials    = errors.New("invalid credentials")
+)
+
+type authManager struct {
+	enabled    bool
+	path       string
+	sessionTTL time.Duration
+
+	mu       sync.RWMutex
+	cached   *storedAuth
+	sessions map[string]authSession
+}
+
+type storedAuth struct {
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash"`
+	CreatedAt    time.Time `json:"created_at"`
+	UIEnabled    *bool     `json:"ui_enabled,omitempty"`
+}
+
+type authSession struct {
+	Username  string
+	ExpiresAt time.Time
+}
+
+type bootstrapRequest struct {
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	ConfirmPassword string `json:"confirm_password"`
+}
+
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type bootstrapViewModel struct {
+	Error string
+}
+
+type loginViewModel struct {
+	Error      string
+	UIDisabled bool
+}
+
+type settingsViewModel struct {
+	Username  string
+	UIEnabled bool
+	Error     string
+	Message   string
+}
+
+var bootstrapTemplate = template.Must(template.New("bootstrap").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Initialize Wattkeeper Node</title>
+  <style>
+    :root { --bg:#f4efe7; --panel:#fffaf2; --ink:#1f2933; --muted:#5f6c7b; --line:#d7c8b3; --accent:#0f766e; --danger:#b91c1c; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:20px; background:linear-gradient(180deg,#efe7da 0%,var(--bg) 55%,#efe9df 100%); color:var(--ink); font-family:"Segoe UI",Tahoma,sans-serif; }
+    .panel { width:min(100%,520px); background:rgba(255,250,242,.96); border:1px solid var(--line); border-radius:20px; padding:28px; box-shadow:0 18px 40px rgba(31,41,51,.08); }
+    h1 { margin:0 0 10px; font-size:clamp(2rem,5vw,2.8rem); line-height:1; }
+    p { margin:0 0 16px; color:var(--muted); }
+    .error { margin-bottom:16px; padding:12px 14px; border-radius:12px; border:1px solid rgba(185,28,28,.18); background:rgba(185,28,28,.08); color:var(--danger); }
+    label { display:block; margin:14px 0 6px; font-size:.92rem; font-weight:600; }
+    input { width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:#fff; font:inherit; }
+    button { margin-top:18px; width:100%; padding:12px 16px; border:0; border-radius:999px; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
+    small { display:block; margin-top:14px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Initialize Node Access</h1>
+    <p>The first browser user creates the local admin account for this node. Public status remains available at <strong>/status</strong>.</p>
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    <form method="post" action="/auth/bootstrap">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required>
+      <label for="confirm_password">Confirm password</label>
+      <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required>
+      <button type="submit">Create admin</button>
+    </form>
+    <small>After bootstrap, the dashboard and detailed status routes use a session cookie unless the process is started with <code>--http-auth=false</code>.</small>
+  </main>
+</body>
+</html>`))
+
+var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign In - Wattkeeper Node</title>
+  <style>
+    :root { --bg:#f4efe7; --panel:#fffaf2; --ink:#1f2933; --muted:#5f6c7b; --line:#d7c8b3; --accent:#0f766e; --danger:#b91c1c; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:20px; background:linear-gradient(180deg,#efe7da 0%,var(--bg) 55%,#efe9df 100%); color:var(--ink); font-family:"Segoe UI",Tahoma,sans-serif; }
+    .panel { width:min(100%,480px); background:rgba(255,250,242,.96); border:1px solid var(--line); border-radius:20px; padding:28px; box-shadow:0 18px 40px rgba(31,41,51,.08); }
+    h1 { margin:0 0 10px; font-size:clamp(2rem,5vw,2.8rem); line-height:1; }
+    p { margin:0 0 16px; color:var(--muted); }
+    .error { margin-bottom:16px; padding:12px 14px; border-radius:12px; border:1px solid rgba(185,28,28,.18); background:rgba(185,28,28,.08); color:var(--danger); }
+    label { display:block; margin:14px 0 6px; font-size:.92rem; font-weight:600; }
+    input { width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:#fff; font:inherit; }
+    button { margin-top:18px; width:100%; padding:12px 16px; border:0; border-radius:999px; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
+    .note { margin-top:14px; }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Sign In</h1>
+    <p>{{if .UIDisabled}}The local node dashboard is currently disabled. You can still sign in to review settings.{{else}}Sign in to reach the node dashboard and detailed status routes.{{end}}</p>
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    <form method="post" action="/auth/login">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p class="note">Public status remains available at <strong>/status</strong>.</p>
+  </main>
+</body>
+</html>`))
+
+var settingsTemplate = template.Must(template.New("settings").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node Settings</title>
+  <style>
+    :root { --bg:#f4efe7; --panel:#fffaf2; --ink:#1f2933; --muted:#5f6c7b; --line:#d7c8b3; --accent:#0f766e; --danger:#b91c1c; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; padding:24px; background:linear-gradient(180deg,#efe7da 0%,var(--bg) 55%,#efe9df 100%); color:var(--ink); font-family:"Segoe UI",Tahoma,sans-serif; }
+    main { max-width:720px; margin:0 auto; }
+    .panel { background:rgba(255,250,242,.96); border:1px solid var(--line); border-radius:20px; padding:24px; box-shadow:0 18px 40px rgba(31,41,51,.08); }
+    h1,h2 { margin:0 0 10px; }
+    p { color:var(--muted); }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .message, .error { margin:16px 0; padding:12px 14px; border-radius:12px; }
+    .message { background:rgba(15,118,110,.08); color:var(--accent); border:1px solid rgba(15,118,110,.18); }
+    .error { background:rgba(185,28,28,.08); color:var(--danger); border:1px solid rgba(185,28,28,.18); }
+    button, .link { padding:12px 16px; border-radius:999px; border:0; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; text-decoration:none; display:inline-block; }
+    .danger { background:var(--danger); }
+    form { margin:16px 0 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="panel">
+      <div class="row">
+        <h1>Node Settings</h1>
+        <a class="link" href="/">Dashboard</a>
+      </div>
+      <p>Signed in as <strong>{{.Username}}</strong>.</p>
+      {{if .Message}}<div class="message">{{.Message}}</div>{{end}}
+      {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+      <h2>Local UI</h2>
+      <p>Current state: <strong>{{if .UIEnabled}}enabled{{else}}disabled{{end}}</strong>. This only affects the local dashboard surface and is the future controller-managed toggle point.</p>
+      <form method="post" action="/settings/ui">
+        <input type="hidden" name="enabled" value="{{if .UIEnabled}}false{{else}}true{{end}}">
+        <button type="submit">{{if .UIEnabled}}Disable local UI{{else}}Enable local UI{{end}}</button>
+      </form>
+
+      <h2>Session</h2>
+      <form method="post" action="/auth/logout">
+        <button type="submit">Sign out</button>
+      </form>
+
+      <h2>Reset</h2>
+      <p>Resetting clears the local admin account and all current sessions, then returns this node to first-run bootstrap.</p>
+      <form method="post" action="/auth/reset">
+        <button class="danger" type="submit">Reset local web auth</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>`))
+
+func newAuthManager(disableAuth bool, path string) *authManager {
+	if path == "" {
+		path = defaultAuthPath
+	}
+	return &authManager{enabled: !disableAuth, path: path, sessionTTL: defaultSessionTTL, sessions: make(map[string]authSession)}
+}
+
+func (a *authManager) Enabled() bool {
+	return a != nil && a.enabled
+}
+
+func (a *authManager) NeedsBootstrap() (bool, error) {
+	if !a.Enabled() {
+		return false, nil
+	}
+	_, err := a.load()
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, errAuthNotConfigured) {
+		return true, nil
+	}
+	return false, err
+}
+
+func (a *authManager) Authenticate(username, password string) error {
+	if !a.Enabled() {
+		return nil
+	}
+	stored, err := a.load()
+	if err != nil {
+		return err
+	}
+	if stored.Username != strings.TrimSpace(username) {
+		return errInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(stored.PasswordHash), []byte(password)); err != nil {
+		return errInvalidCredentials
+	}
+	return nil
+}
+
+func (a *authManager) CreateSession(username string) (string, error) {
+	if !a.Enabled() {
+		return "", errAuthDisabled
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cleanupExpiredSessionsLocked(time.Now().UTC())
+	a.sessions[token] = authSession{Username: username, ExpiresAt: time.Now().UTC().Add(a.sessionTTL)}
+	return token, nil
+}
+
+func (a *authManager) SessionUsername(r *http.Request) (string, error) {
+	if !a.Enabled() {
+		return "", nil
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return "", errInvalidCredentials
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cleanupExpiredSessionsLocked(time.Now().UTC())
+	session, ok := a.sessions[cookie.Value]
+	if !ok {
+		return "", errInvalidCredentials
+	}
+	return session.Username, nil
+}
+
+func (a *authManager) ClearSession(token string) {
+	if token == "" {
+		return
+	}
+	a.mu.Lock()
+	delete(a.sessions, token)
+	a.mu.Unlock()
+}
+
+func (a *authManager) Bootstrap(req bootstrapRequest) error {
+	if !a.Enabled() {
+		return errAuthDisabled
+	}
+	if err := validateBootstrapRequest(req); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cached != nil {
+		return errAuthAlreadyConfigured
+	}
+	if _, err := os.Stat(a.path); err == nil {
+		return errAuthAlreadyConfigured
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat auth config: %w", err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	enabled := true
+	stored := &storedAuth{Username: strings.TrimSpace(req.Username), PasswordHash: string(hash), CreatedAt: time.Now().UTC(), UIEnabled: &enabled}
+	return a.saveLocked(stored)
+}
+
+func (a *authManager) UIEnabled() (bool, error) {
+	stored, err := a.load()
+	if err != nil {
+		return false, err
+	}
+	return stored.isUIEnabled(), nil
+}
+
+func (a *authManager) SetUIEnabled(enabled bool) error {
+	stored, err := a.load()
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	stored.UIEnabled = &enabled
+	return a.saveLocked(stored)
+}
+
+func (a *authManager) Reset() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cached = nil
+	a.sessions = make(map[string]authSession)
+	if err := os.Remove(a.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove auth config: %w", err)
+	}
+	return nil
+}
+
+func (a *authManager) load() (*storedAuth, error) {
+	a.mu.RLock()
+	if a.cached != nil {
+		stored := *a.cached
+		a.mu.RUnlock()
+		return &stored, nil
+	}
+	a.mu.RUnlock()
+	content, err := os.ReadFile(a.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errAuthNotConfigured
+		}
+		return nil, fmt.Errorf("read auth config: %w", err)
+	}
+	var stored storedAuth
+	if err := json.Unmarshal(content, &stored); err != nil {
+		return nil, fmt.Errorf("decode auth config: %w", err)
+	}
+	if stored.Username == "" || stored.PasswordHash == "" {
+		return nil, fmt.Errorf("decode auth config: missing username or password hash")
+	}
+	a.mu.Lock()
+	a.cached = &stored
+	a.mu.Unlock()
+	return &stored, nil
+}
+
+func (a *authManager) saveLocked(stored *storedAuth) error {
+	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
+		return fmt.Errorf("create auth config dir: %w", err)
+	}
+	content, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode auth config: %w", err)
+	}
+	tempPath := a.path + ".tmp"
+	if err := os.WriteFile(tempPath, append(content, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write auth config: %w", err)
+	}
+	if err := os.Rename(tempPath, a.path); err != nil {
+		return fmt.Errorf("rename auth config: %w", err)
+	}
+	copyStored := *stored
+	a.cached = &copyStored
+	return nil
+}
+
+func (a *authManager) cleanupExpiredSessionsLocked(now time.Time) {
+	for token, session := range a.sessions {
+		if now.After(session.ExpiresAt) {
+			delete(a.sessions, token)
+		}
+	}
+}
+
+func (s *storedAuth) isUIEnabled() bool {
+	return s.UIEnabled == nil || *s.UIEnabled
+}
+
+func validateBootstrapRequest(req bootstrapRequest) error {
+	username := strings.TrimSpace(req.Username)
+	if len(username) < 3 {
+		return errors.New("username must be at least 3 characters")
+	}
+	if strings.ContainsAny(username, ": \t\n\r") {
+		return errors.New("username cannot contain whitespace or ':'")
+	}
+	if len(req.Password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	if req.ConfirmPassword != "" && req.Password != req.ConfirmPassword {
+		return errors.New("passwords do not match")
+	}
+	return nil
+}
+
+func validateLoginRequest(req loginRequest) error {
+	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
+		return errors.New("username and password are required")
+	}
+	return nil
+}
+
+func randomToken(size int) (string, error) {
+	buffer := make([]byte, size)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}

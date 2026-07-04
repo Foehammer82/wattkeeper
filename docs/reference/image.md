@@ -27,7 +27,8 @@ sha256sum -c wattkeeper-node-v0.1.0.img.xz.sha256
 - use Raspberry Pi Imager
 - choose `Use custom`
 - select the `.img.xz` artifact directly
-- configure WiFi and SSH before writing
+- configure WiFi before writing
+- optionally configure SSH public-key access for the `wattkeeper` user
 
 ## Compatibility
 
@@ -52,6 +53,8 @@ The current image flow relies on Raspberry Pi OS first boot for filesystem expan
 
 Wattkeeper adds a first-boot service that:
 
+- suppresses Raspberry Pi OS first-user setup prompts by shipping a pre-created `wattkeeper` account
+- locks that account password on first boot so password login is not part of the normal workflow
 - sets the hostname to `wkeeper-node-<last4 serial>`
 - creates `/var/lib/wattkeeper`
 - marks itself complete and disables itself
@@ -62,12 +65,13 @@ When working on the image pipeline or Pi provisioning flow, the current validati
 
 1. Run `make image VERSION=v0.1.0-rc1` and wait for the `.img.xz` and `.sha256` artifacts in `dist/`.
 2. If you are iterating on the custom pi-gen stage after a failed run, retry with `CONTINUE=1 make image VERSION=v0.1.0-rc1`.
-3. Flash the image with Raspberry Pi Imager and apply WiFi and SSH customization there.
+3. Flash the image with Raspberry Pi Imager and apply WiFi customization there. Add SSH public keys only if you want shell access.
 4. Boot a Pi Zero 2 W and attach a USB UPS.
-5. Verify hostname rewrite, `/var/lib/wattkeeper` creation, mDNS advertisement, and remote `upsc` access.
+5. Verify there is no first-boot username or password prompt, then verify hostname rewrite, `/var/lib/wattkeeper` creation, mDNS advertisement, and remote `upsc` access.
 
 ## Security Notes
 
 - no WiFi credentials are baked into source-controlled image artifacts
 - no SSH authorized keys are baked into the image by default
 - no NUT passwords or controller credentials are baked into the image
+- SSH password authentication is disabled; use Raspberry Pi Imager to inject keys for the `wattkeeper` user if you need shell access

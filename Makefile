@@ -4,8 +4,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 RELEASE_DIR := $(DIST_DIR)/release
 UV ?= uv
 DOCS_UV_RUN := $(UV) run --locked --group docs
+NODE_DEV_UI_LISTEN ?= 127.0.0.1:8080
+NODE_DEV_UI_FLAGS ?=
 
-.PHONY: agent release-agent test lint image docs-setup docs-build docs-serve sim-up sim-down
+.PHONY: agent release-agent test lint image docs-setup docs-build docs-serve node-dev-ui node-dev-ui-open sim-up sim-down
 
 agent:
 	@mkdir -p $(DIST_DIR)
@@ -47,6 +49,12 @@ docs-build: pyproject.toml
 
 docs-serve: pyproject.toml
 	$(DOCS_UV_RUN) mkdocs serve
+
+node-dev-ui:
+	go run ./agent/cmd/agent --dev-ui --listen $(NODE_DEV_UI_LISTEN) $(NODE_DEV_UI_FLAGS)
+
+node-dev-ui-open:
+	go run ./agent/cmd/agent --dev-ui --listen $(NODE_DEV_UI_LISTEN) --http-auth=false $(NODE_DEV_UI_FLAGS)
 
 sim-up sim-down:
 	@echo not implemented

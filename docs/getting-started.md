@@ -58,9 +58,9 @@ You should see `OK`.
 4. Select the target SD card.
 5. Open the Imager customization dialog.
 6. Configure:
-   - WiFi SSID, password, and country
-   - SSH enabled with at least one public key
-   - key-based authentication
+    - WiFi SSID, password, and country
+    - optionally enable SSH with at least one public key
+    - if you enable SSH, use key-based authentication for the `wattkeeper` user
 7. Write the image to the SD card.
 
 Raspberry Pi Imager can write the compressed `.img.xz` directly. Do not unpack it first unless you have a separate reason to do that.
@@ -75,15 +75,24 @@ Raspberry Pi Imager can write the compressed `.img.xz` directly. Do not unpack i
 Expected first-boot behavior:
 
 - the filesystem expands
+- there is no username or password creation prompt
 - the hostname becomes `wkeeper-node-<last4 serial>`
 - `/var/lib/wattkeeper` is created
 - the agent starts automatically
+
+The first browser visit to `http://<pi-ip>/` initializes node-local web access by prompting for a local admin username and password. This is separate from SSH access. After bootstrap, the browser signs in through a session-based flow for the dashboard and detailed status pages.
+
+If you enabled SSH in Raspberry Pi Imager, connect as `wattkeeper` with your injected public key.
 
 ## Validate The Node
 
 After boot:
 
 - verify the node is reachable on your LAN
+- verify `http://<pi-ip>/` prompts for first-run bootstrap or loads the authenticated node dashboard
+- verify `curl http://<pi-ip>/status` returns the minimal public node status payload
+- verify `http://<pi-ip>/settings` is available after sign-in for logout, auth reset, and the local UI toggle
+- verify `curl http://<pi-ip>/status/details` returns the richer local status payload when authenticated through the browser session or other future trusted client flow
 - verify `_wattkeeper._tcp` is advertised
 - verify the UPS appears through NUT from another machine with `upsc <ups-name>@<pi-ip>`
 

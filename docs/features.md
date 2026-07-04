@@ -11,7 +11,12 @@ This page separates what Wattkeeper ships today from what is still planned.
 - generates deterministic NUT configuration
 - restarts or reloads NUT services only when generated config changes
 - advertises the node over mDNS as `_wattkeeper._tcp`
-- exposes a local health endpoint on port `8080`
+- exposes a local node dashboard on port `80`
+- serves a minimal public JSON node status at `/status`
+- serves detailed node JSON at `/status/details`
+- preserves `/healthz` as a detailed compatibility endpoint
+- requires first-run bootstrap and session-based local auth for the dashboard and detailed endpoints unless auth is explicitly disabled for development
+- includes a local settings surface for sign-out, auth reset, and node UI enable/disable
 
 ### Flashable Node Image
 
@@ -51,6 +56,6 @@ This page separates what Wattkeeper ships today from what is still planned.
 ## Current Limitations
 
 - there is no shipped controller application yet
-- there is no end-user web UI yet
+- there is no central controller web UI yet
 - Home Assistant integration is not yet available
 - multi-node management is still future work

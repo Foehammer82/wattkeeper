@@ -2,7 +2,7 @@
 
 Wattkeeper is a distributed UPS monitoring and management system built around a controller/adopt model.
 
-Small Raspberry Pi nodes run NUT near the hardware, automatically detect USB UPS devices, expose them on the network, and advertise themselves for discovery. A central controller discovers those nodes, adopts them, collects metrics, and eventually bridges the fleet into Home Assistant.
+Small Raspberry Pi nodes run NUT near the hardware, automatically detect USB UPS devices, expose them on the network, serve a per-node web dashboard and status API, and advertise themselves for discovery. A central controller discovers those nodes, adopts them, collects metrics, and eventually bridges the fleet into Home Assistant.
 
 ## Status
 

@@ -11,13 +11,25 @@ The agent is the hardware-facing process that runs on a Raspberry Pi node near t
 - render NUT configuration under `/etc/nut`
 - manage relevant NUT services when generated config changes
 - advertise the node over mDNS
-- expose a local health endpoint
+- expose a local node dashboard and status API
 
-## Health Endpoint
+## HTTP Endpoints
 
-The agent exposes `GET /healthz` on port `8080`.
+The agent exposes a node dashboard at `/` plus JSON endpoints at `GET /status` and `GET /healthz` on port `80` by default.
 
-The health response is intended to describe the current node state, including version and UPS-related status.
+`GET /status` is the public, minimal response intended for quick checks and discovery-oriented state.
+
+`GET /status/details` is the richer node status payload intended for the local UI and a later authenticated audience.
+
+`GET /healthz` is the richer compatibility health payload and includes the same class of detailed node state.
+
+`GET /settings` exposes the signed-in settings surface for local node UI policy, sign-out, and auth reset.
+
+On an uninitialized node with auth enabled, visiting `/` presents a bootstrap page that creates the local admin account. After bootstrap, `/`, `/status/details`, `/healthz`, and `/settings` require a session cookie created by `POST /auth/login`. For development only, auth can be bypassed with `--http-auth=false`.
+
+To manually reset local web auth on a node, remove `/var/lib/wattkeeper/webui-auth.json` and revisit `/`.
+
+For local UI and API development away from Pi hardware, run `go run ./agent/cmd/agent --dev-ui --listen :8080` from WSL or another Linux environment. That mode serves sample data and skips hotplug, scanner, and system service integration.
 
 ## Discovery Advertisement
 

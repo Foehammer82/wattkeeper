@@ -17,6 +17,10 @@ fi
 
 hostname="wkeeper-node-$suffix"
 
+if id -u wattkeeper >/dev/null 2>&1; then
+	passwd -l wattkeeper >/dev/null 2>&1 || true
+fi
+
 if command -v hostnamectl >/dev/null 2>&1; then
 	hostnamectl set-hostname "$hostname"
 else

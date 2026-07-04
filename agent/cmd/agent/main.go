@@ -36,6 +36,9 @@ type config struct {
 	configDir string
 	listen    string
 	logLevel  string
+	devUI     bool
+	httpAuth  bool
+	authPath  string
 }
 
 type hotplugWatcher interface {
@@ -90,7 +93,7 @@ func main() {
 	defer stop()
 
 	logger := log.New(os.Stdout, "wattkeeper-agent: ", log.LstdFlags)
-	logger.Printf("starting config_dir=%s listen=%s log_level=%s", cfg.configDir, cfg.listen, cfg.logLevel)
+	logger.Printf("starting config_dir=%s listen=%s log_level=%s dev_ui=%t http_auth=%t", cfg.configDir, cfg.listen, cfg.logLevel, cfg.devUI, cfg.httpAuth)
 
 	if err := run(ctx, logger, cfg); err != nil {
 		logger.Printf("fatal error: %v", err)
@@ -104,14 +107,21 @@ func parseFlags() config {
 	var cfg config
 
 	flag.StringVar(&cfg.configDir, "config-dir", "/etc/nut", "directory containing NUT configuration")
-	flag.StringVar(&cfg.listen, "listen", ":8080", "agent listen address")
+	flag.StringVar(&cfg.listen, "listen", ":80", "agent listen address")
 	flag.StringVar(&cfg.logLevel, "log-level", "info", "log verbosity level")
+	flag.BoolVar(&cfg.devUI, "dev-ui", false, "serve the node UI and API with sample data only")
+	flag.BoolVar(&cfg.httpAuth, "http-auth", true, "require bootstrap and Basic Auth for the node dashboard and detailed status routes")
+	flag.StringVar(&cfg.authPath, "http-auth-file", "/var/lib/wattkeeper/webui-auth.json", "path to the node web auth file")
 	flag.Parse()
 
 	return cfg
 }
 
 func run(ctx context.Context, logger *log.Logger, cfg config) error {
+	if cfg.devUI {
+		return runDevUI(ctx, logger, cfg)
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -126,9 +136,11 @@ func run(ctx context.Context, logger *log.Logger, cfg config) error {
 	}
 
 	healthAPI := api.New(logger, api.Options{
-		Version:   version,
-		Serial:    identity.Serial,
-		StartedAt: time.Now(),
+		Version:     version,
+		Serial:      identity.Serial,
+		StartedAt:   time.Now(),
+		DisableAuth: !cfg.httpAuth,
+		AuthPath:    cfg.authPath,
 	})
 	httpServer := &http.Server{Handler: healthAPI.Handler()}
 	httpErr := make(chan error, 1)
@@ -177,6 +189,77 @@ func run(ctx context.Context, logger *log.Logger, cfg config) error {
 		if result == nil {
 			result = fmt.Errorf("shutdown http server: %w", err)
 		} else {
+			logger.Printf("http shutdown failed: %v", err)
+		}
+	}
+
+	return result
+}
+
+type sampleRunner struct {
+	statuses map[string]string
+}
+
+func (s sampleRunner) CombinedOutput(_ context.Context, _ string, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("missing UPS name")
+	}
+	status, ok := s.statuses[args[0]]
+	if !ok {
+		return nil, fmt.Errorf("unknown UPS %q", args[0])
+	}
+	return []byte("ups.status: " + status + "\n"), nil
+}
+
+func runDevUI(ctx context.Context, logger *log.Logger, cfg config) error {
+	listener, err := net.Listen("tcp", cfg.listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.listen, err)
+	}
+
+	devices := []nutconf.DetectedUPS{
+		{Name: "ups-lab-a", Driver: "usbhid-ups", Vendor: "APC", Product: "Back-UPS Pro 1500"},
+		{Name: "ups-lab-b", Driver: "blazer_usb", Vendor: "CyberPower", Product: "CP1500AVRLCD3"},
+	}
+	service := api.New(logger, api.Options{
+		Version:   version,
+		Serial:    "dev-node-0000",
+		StartedAt: time.Now(),
+		Runner: sampleRunner{statuses: map[string]string{
+			"ups-lab-a": "OL",
+			"ups-lab-b": "OB DISCHRG",
+		}},
+		DisableAuth: !cfg.httpAuth,
+		AuthPath:    cfg.authPath,
+	})
+	service.UpdateInventory(devices)
+
+	httpServer := &http.Server{Handler: service.Handler()}
+	httpErr := make(chan error, 1)
+	go func() {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			httpErr <- err
+		}
+	}()
+
+	if logger != nil {
+		logger.Printf("dev UI mode serving on http://%s", listener.Addr().String())
+	}
+
+	var result error
+	select {
+	case <-ctx.Done():
+		result = nil
+	case err := <-httpErr:
+		result = fmt.Errorf("serve http: %w", err)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if result == nil {
+			result = fmt.Errorf("shutdown http server: %w", err)
+		} else if logger != nil {
 			logger.Printf("http shutdown failed: %v", err)
 		}
 	}

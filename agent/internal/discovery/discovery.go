@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultDomain     = "local."
-	defaultPort       = 8080
+	defaultPort       = 80
 	defaultService    = "_wattkeeper._tcp"
 	devTreeSerialPath = "/sys/firmware/devicetree/base/serial-number"
 	machineIDPath     = "/etc/machine-id"
