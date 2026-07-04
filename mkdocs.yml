@@ -1,16 +1,52 @@
 site_name: Wattkeeper Docs
 site_description: User-facing documentation for Wattkeeper nodes, images, and future controller workflows.
+repo_url: https://github.com/Foehammer82/wattkeeper
+repo_name: Foehammer82/wattkeeper
+edit_uri: edit/main/docs/
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+    view: material/eye
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
   features:
+    - content.action.view
+    - navigation.instant
     - navigation.sections
+    - navigation.tracking
     - navigation.top
     - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
 markdown_extensions:
   - admonition
   - tables
   - toc:
       permalink: true
+plugins:
+  - search
+  - git-revision-date-localized:
+      enable_creation_date: true
+      fallback_to_build_date: true
+      exclude:
+        - index.md
 nav:
   - Home: index.md
   - Getting Started: getting-started.md

@@ -50,7 +50,7 @@ You should see `OK`.
 ## Flash The SD Card
 
 !!! info "Need Raspberry Pi Imager?"
-   Download it from [raspberrypi.com/software/](https://www.raspberrypi.com/software/).
+    Download it from [raspberrypi.com/software/](https://www.raspberrypi.com/software/).
 
 1. Open Raspberry Pi Imager.
 2. Choose `Use custom`.

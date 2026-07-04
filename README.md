@@ -102,6 +102,8 @@ Image build prerequisites and the flash workflow are documented in [image/README
 
 The user-facing documentation set lives in [docs/](docs). If you are looking for setup steps, product capabilities, or operational reference material, start there.
 
+Local docs tooling is managed with `uv`. Use `make docs-setup`, `make docs-build`, or `make docs-serve` from the repo root after installing `uv`.
+
 For the current user-facing path, start with:
 
 - [docs/getting-started.md](docs/getting-started.md) for building, flashing, and validating a node image
