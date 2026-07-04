@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Foehammer82/wattkeeper/controller/internal/aggregatenut"
 	"github.com/Foehammer82/wattkeeper/controller/internal/alerts"
 	"github.com/Foehammer82/wattkeeper/controller/internal/browse"
 	"github.com/Foehammer82/wattkeeper/controller/internal/ca"
@@ -49,6 +52,11 @@ type config struct {
 	mqttPassword        string
 	mqttDiscoveryPrefix string
 	mqttStatePrefix     string
+	discoverySeeds      string
+	aggregateNUTListen  string
+	aggregateNUTEnabled bool
+	aggregateNUTUser    string
+	aggregateNUTPass    string
 }
 
 type app struct {
@@ -61,6 +69,7 @@ type app struct {
 	client    *http.Client
 	vault     *securestore.Store
 	alerts    *alerts.Engine
+	aggregate *aggregatenut.Manager
 }
 
 type nodeResponse struct {
@@ -153,6 +162,17 @@ type alertEventsResponse struct {
 	Events []registry.AlertEvent `json:"events"`
 }
 
+type controllerSettingsResponse struct {
+	AggregateNUTEnabled bool   `json:"aggregate_nut_enabled"`
+	AggregateNUTListen  string `json:"aggregate_nut_listen"`
+	AggregateNUTActive  bool   `json:"aggregate_nut_active"`
+}
+
+type updateControllerSettingsRequest struct {
+	AggregateNUTEnabled *bool   `json:"aggregate_nut_enabled,omitempty"`
+	AggregateNUTListen  *string `json:"aggregate_nut_listen,omitempty"`
+}
+
 type createAlertRuleRequest struct {
 	Kind            string   `json:"kind"`
 	UPSVar          string   `json:"ups_var"`
@@ -239,6 +259,11 @@ var (
 	errTrustedNodeFingerprintDrift = errors.New("node TLS fingerprint mismatch")
 )
 
+const (
+	adoptRequestMaxAttempts = 3
+	adoptRetryBackoff       = 400 * time.Millisecond
+)
+
 //go:embed assets/*
 var webAssets embed.FS
 
@@ -270,6 +295,7 @@ func main() {
 	defer stop()
 
 	browser := browse.New(logger)
+	browser.ConfigureSeeds(cfg.discoverySeeds)
 	if err := browser.Start(ctx); err != nil {
 		logger.Fatalf("start discovery browser: %v", err)
 	}
@@ -283,6 +309,21 @@ func main() {
 		ca:        authority,
 		client:    &http.Client{Timeout: 10 * time.Second},
 		vault:     vault,
+		aggregate: aggregatenut.NewManager(logger),
+	}
+	application.aggregate.SetBackend(&aggregateNUTBackend{app: application})
+	application.aggregate.SetAuthenticator(func(username, password string) bool {
+		return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(username)), []byte(strings.TrimSpace(cfg.aggregateNUTUser))) == 1 &&
+			subtle.ConstantTimeCompare([]byte(strings.TrimSpace(password)), []byte(cfg.aggregateNUTPass)) == 1
+	})
+
+	settingsDefaults := registry.ControllerSettings{AggregateNUTEnabled: cfg.aggregateNUTEnabled, AggregateNUTListen: cfg.aggregateNUTListen}
+	settings, err := store.LoadControllerSettings(ctx, settingsDefaults)
+	if err != nil {
+		logger.Fatalf("load controller settings: %v", err)
+	}
+	if err := application.aggregate.Apply(ctx, settings.AggregateNUTEnabled, settings.AggregateNUTListen); err != nil {
+		logger.Fatalf("apply aggregate NUT settings: %v", err)
 	}
 	alertEngine := &alerts.Engine{Logger: logger, Store: store}
 	application.alerts = alertEngine
@@ -293,6 +334,10 @@ func main() {
 		DiscoveryPrefix: cfg.mqttDiscoveryPrefix,
 		StatePrefix:     cfg.mqttStatePrefix,
 		ClientID:        "wattkeeper-controller",
+		CommandHandler: func(commandCtx context.Context, request controllermqtt.CommandRequest) error {
+			_, runErr := application.runTrustedUPSCommand(commandCtx, request.NodeID, request.UPSName, request.Command)
+			return runErr
+		},
 	})
 	if err != nil {
 		logger.Fatalf("create mqtt publisher: %v", err)
@@ -335,6 +380,7 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
+		application.aggregate.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -359,6 +405,11 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mqttPassword, "mqtt-password", "", "MQTT password for the Home Assistant bridge")
 	flag.StringVar(&cfg.mqttDiscoveryPrefix, "mqtt-discovery-prefix", "homeassistant", "Home Assistant MQTT discovery prefix")
 	flag.StringVar(&cfg.mqttStatePrefix, "mqtt-state-prefix", "wattkeeper", "MQTT state topic prefix")
+	flag.StringVar(&cfg.discoverySeeds, "discovery-seeds", "", "optional comma-separated host:port targets for discovery fallback when mDNS is unavailable")
+	flag.StringVar(&cfg.aggregateNUTListen, "aggregate-nut-listen", ":3493", "controller aggregate NUT listen address")
+	flag.BoolVar(&cfg.aggregateNUTEnabled, "aggregate-nut-enabled", true, "enable controller aggregate NUT listener")
+	flag.StringVar(&cfg.aggregateNUTUser, "aggregate-nut-user", "controller", "username required for aggregate NUT listener")
+	flag.StringVar(&cfg.aggregateNUTPass, "aggregate-nut-pass", "controller", "password required for aggregate NUT listener")
 	flag.Parse()
 	return cfg
 }
@@ -372,6 +423,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/alerts/rules", a.handleAlertRules)
 	mux.HandleFunc("/api/alerts/rules/", a.handleAlertRules)
 	mux.HandleFunc("/api/alerts/events", a.handleAlertEvents)
+	mux.HandleFunc("/api/settings/controller", a.handleControllerSettings)
 	mux.HandleFunc("/api/nodes", a.handleNodes)
 	mux.HandleFunc("/api/nodes/", a.handleNodes)
 	mux.HandleFunc("/", a.handleIndex)
@@ -531,6 +583,237 @@ func (a *app) handleAlertEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, alertEventsResponse{Events: events})
+}
+
+func (a *app) handleControllerSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := a.loadControllerSettings(r.Context())
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, a.controllerSettingsResponse(settings))
+		return
+	case http.MethodPatch:
+		var request updateControllerSettingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("decode controller settings patch: %v", err))
+			return
+		}
+		if request.AggregateNUTEnabled == nil && request.AggregateNUTListen == nil {
+			writeJSONError(w, http.StatusBadRequest, "controller settings patch is empty")
+			return
+		}
+		current, err := a.loadControllerSettings(r.Context())
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		next := current
+		if request.AggregateNUTEnabled != nil {
+			next.AggregateNUTEnabled = *request.AggregateNUTEnabled
+		}
+		if request.AggregateNUTListen != nil {
+			next.AggregateNUTListen = strings.TrimSpace(*request.AggregateNUTListen)
+		}
+		if strings.TrimSpace(next.AggregateNUTListen) == "" {
+			writeJSONError(w, http.StatusBadRequest, "aggregate_nut_listen is required")
+			return
+		}
+		if _, _, splitErr := net.SplitHostPort(normalizeListenAddress(next.AggregateNUTListen)); splitErr != nil {
+			writeJSONError(w, http.StatusBadRequest, "aggregate_nut_listen must be host:port or :port")
+			return
+		}
+		if err := a.aggregate.Apply(r.Context(), next.AggregateNUTEnabled, next.AggregateNUTListen); err != nil {
+			writeJSONError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		if err := a.registry.SaveControllerSettings(r.Context(), next); err != nil {
+			_ = a.aggregate.Apply(r.Context(), current.AggregateNUTEnabled, current.AggregateNUTListen)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, a.controllerSettingsResponse(next))
+		return
+	default:
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPatch)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *app) loadControllerSettings(ctx context.Context) (registry.ControllerSettings, error) {
+	defaults := registry.ControllerSettings{AggregateNUTEnabled: a.config.aggregateNUTEnabled, AggregateNUTListen: a.config.aggregateNUTListen}
+	settings, err := a.registry.LoadControllerSettings(ctx, defaults)
+	if err != nil {
+		return registry.ControllerSettings{}, err
+	}
+	if strings.TrimSpace(settings.AggregateNUTListen) == "" {
+		settings.AggregateNUTListen = defaults.AggregateNUTListen
+	}
+	if strings.TrimSpace(settings.AggregateNUTListen) == "" {
+		settings.AggregateNUTListen = ":3493"
+	}
+	return settings, nil
+}
+
+func (a *app) controllerSettingsResponse(settings registry.ControllerSettings) controllerSettingsResponse {
+	_, listen, active := a.aggregate.Status()
+	if strings.TrimSpace(listen) == "" {
+		listen = settings.AggregateNUTListen
+	}
+	if strings.TrimSpace(listen) == "" {
+		listen = ":3493"
+	}
+	return controllerSettingsResponse{AggregateNUTEnabled: settings.AggregateNUTEnabled, AggregateNUTListen: listen, AggregateNUTActive: active}
+}
+
+func normalizeListenAddress(listen string) string {
+	trimmed := strings.TrimSpace(listen)
+	if strings.HasPrefix(trimmed, ":") {
+		return "0.0.0.0" + trimmed
+	}
+	return trimmed
+}
+
+type aggregateNUTBackend struct {
+	app *app
+}
+
+func (b *aggregateNUTBackend) List(ctx context.Context) ([]aggregatenut.UPS, error) {
+	if b == nil || b.app == nil || b.app.registry == nil {
+		return nil, nil
+	}
+	nodes, err := b.app.registry.ListAdoptedNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	upses := make([]aggregatenut.UPS, 0)
+	for _, node := range nodes {
+		summaries, err := b.app.registry.ListNodeUPSSummaries(ctx, node.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, summary := range summaries {
+			detail, err := b.app.registry.GetUPSDetail(ctx, node.ID, summary.Name)
+			if err != nil {
+				if errors.Is(err, registry.ErrUPSNotFound) {
+					continue
+				}
+				return nil, err
+			}
+			variables := make(map[string]string, len(detail.Variables)+4)
+			for key, value := range detail.Variables {
+				variables[key] = value
+			}
+			if strings.TrimSpace(variables["ups.status"]) == "" {
+				variables["ups.status"] = summary.Status
+			}
+			if _, ok := variables["battery.charge"]; !ok && summary.BatteryChargePercent != nil {
+				variables["battery.charge"] = strconv.FormatFloat(*summary.BatteryChargePercent, 'f', -1, 64)
+			}
+			if _, ok := variables["ups.load"]; !ok && summary.LoadPercent != nil {
+				variables["ups.load"] = strconv.FormatFloat(*summary.LoadPercent, 'f', -1, 64)
+			}
+			if _, ok := variables["battery.runtime"]; !ok && summary.RuntimeSeconds != nil {
+				variables["battery.runtime"] = strconv.FormatInt(*summary.RuntimeSeconds, 10)
+			}
+			upses = append(upses, aggregatenut.UPS{
+				Name:        aggregateUPSAlias(node.ID, summary.Name),
+				Description: fmt.Sprintf("%s on %s", summary.Name, node.ID),
+				Variables:   variables,
+			})
+		}
+	}
+	sort.Slice(upses, func(i, j int) bool { return upses[i].Name < upses[j].Name })
+	return upses, nil
+}
+
+func (b *aggregateNUTBackend) RunCommand(ctx context.Context, aggregateUPSName, command string) error {
+	if b == nil || b.app == nil || b.app.registry == nil {
+		return aggregatenut.ErrUnknownUPS
+	}
+	target, ok, err := b.resolve(ctx, aggregateUPSName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return aggregatenut.ErrUnknownUPS
+	}
+	_, err = b.app.runTrustedUPSCommand(ctx, target.nodeID, target.upsName, command)
+	if errors.Is(err, registry.ErrUPSNotFound) {
+		return aggregatenut.ErrUnknownUPS
+	}
+	return err
+}
+
+func (b *aggregateNUTBackend) ListCommands(ctx context.Context, aggregateUPSName string) ([]aggregatenut.Command, error) {
+	if b == nil || b.app == nil || b.app.registry == nil {
+		return nil, aggregatenut.ErrUnknownUPS
+	}
+	target, ok, err := b.resolve(ctx, aggregateUPSName)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, aggregatenut.ErrUnknownUPS
+	}
+	detail, err := b.app.fetchTrustedUPSDetail(ctx, target.nodeID, target.upsName)
+	if err != nil {
+		if errors.Is(err, registry.ErrUPSNotFound) {
+			return nil, aggregatenut.ErrUnknownUPS
+		}
+		return nil, err
+	}
+	commands := make([]aggregatenut.Command, 0, len(detail.Commands))
+	for _, command := range detail.Commands {
+		trimmedName := strings.TrimSpace(command.Name)
+		if trimmedName == "" {
+			continue
+		}
+		commands = append(commands, aggregatenut.Command{Name: trimmedName, Description: strings.TrimSpace(command.Description)})
+	}
+	sort.Slice(commands, func(i, j int) bool { return commands[i].Name < commands[j].Name })
+	return commands, nil
+}
+
+type aggregateUPSTarget struct {
+	nodeID  string
+	upsName string
+}
+
+func (b *aggregateNUTBackend) resolve(ctx context.Context, aggregateUPSName string) (aggregateUPSTarget, bool, error) {
+	nodes, err := b.app.registry.ListAdoptedNodes(ctx)
+	if err != nil {
+		return aggregateUPSTarget{}, false, err
+	}
+	for _, node := range nodes {
+		summaries, err := b.app.registry.ListNodeUPSSummaries(ctx, node.ID)
+		if err != nil {
+			return aggregateUPSTarget{}, false, err
+		}
+		for _, summary := range summaries {
+			if aggregateUPSAlias(node.ID, summary.Name) == aggregateUPSName {
+				return aggregateUPSTarget{nodeID: node.ID, upsName: summary.Name}, true, nil
+			}
+		}
+	}
+	return aggregateUPSTarget{}, false, nil
+}
+
+func aggregateUPSAlias(nodeID, upsName string) string {
+	return aggregateSlug(nodeID) + "__" + aggregateSlug(upsName)
+}
+
+func aggregateSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(" ", "_", "/", "_", ".", "_", ":", "_", "-", "_")
+	value = replacer.Replace(value)
+	value = strings.Trim(value, "_")
+	if value == "" {
+		return "item"
+	}
+	return value
 }
 
 func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -950,7 +1233,20 @@ func (a *app) buildNodeResponse(ctx context.Context, id string) (nodeResponse, e
 }
 
 func (a *app) syncLiveNodes(ctx context.Context) error {
+	existingNodes, err := a.registry.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	existingAdoptedByID := make(map[string]bool, len(existingNodes))
+	for _, node := range existingNodes {
+		existingAdoptedByID[node.ID] = node.Adopted
+	}
+
 	for _, live := range a.browser.Snapshot() {
+		adopted := live.Adopted
+		if existingAdoptedByID[live.ID] {
+			adopted = true
+		}
 		if err := a.registry.UpsertDiscoveredNode(ctx, registry.Node{
 			ID:       live.ID,
 			Instance: live.Instance,
@@ -959,7 +1255,7 @@ func (a *app) syncLiveNodes(ctx context.Context) error {
 			Port:     live.Port,
 			Version:  live.Version,
 			UPSCount: live.UPSCount,
-			Adopted:  live.Adopted,
+			Adopted:  adopted,
 			LastSeen: live.LastSeen,
 		}); err != nil {
 			return err
@@ -1065,10 +1361,11 @@ func buildMQTTSnapshots(ctx context.Context, a *app) ([]controllermqtt.NodeSnaps
 		}
 		upsInfos := make([]controllermqtt.UPSInfo, 0, len(summaries))
 		for _, summary := range summaries {
-			detail, detailErr := a.registry.GetUPSDetail(ctx, node.ID, summary.Name)
+			storedDetail, detailErr := a.registry.GetUPSDetail(ctx, node.ID, summary.Name)
 			if detailErr != nil && !errors.Is(detailErr, registry.ErrUPSNotFound) {
 				return nil, detailErr
 			}
+			liveDetail, liveErr := a.fetchTrustedUPSDetail(ctx, node.ID, summary.Name)
 			upsInfo := controllermqtt.UPSInfo{
 				Name:          summary.Name,
 				DisplayName:   summary.Name,
@@ -1080,8 +1377,33 @@ func buildMQTTSnapshots(ctx context.Context, a *app) ([]controllermqtt.NodeSnaps
 				OnBattery:     strings.Contains(strings.ToUpper(summary.Status), "OB"),
 				LowBattery:    summary.BatteryChargePercent != nil && *summary.BatteryChargePercent <= 20,
 			}
-			if detailErr == nil {
-				if inputVoltage := parseFloatVariable(detail.Variables["input.voltage"]); inputVoltage != nil {
+			if liveErr == nil {
+				if strings.TrimSpace(liveDetail.Status) != "" {
+					upsInfo.Status = liveDetail.Status
+					upsInfo.OnBattery = strings.Contains(strings.ToUpper(liveDetail.Status), "OB")
+				}
+				if liveDetail.Metrics.BatteryChargePercent != nil {
+					upsInfo.BatteryCharge = liveDetail.Metrics.BatteryChargePercent
+					upsInfo.LowBattery = *liveDetail.Metrics.BatteryChargePercent <= 20
+				}
+				if liveDetail.Metrics.LoadPercent != nil {
+					upsInfo.LoadPercent = liveDetail.Metrics.LoadPercent
+				}
+				if liveDetail.Metrics.RuntimeSeconds != nil {
+					upsInfo.Runtime = liveDetail.Metrics.RuntimeSeconds
+				}
+				if inputVoltage := parseFloatVariable(liveDetail.Variables["input.voltage"]); inputVoltage != nil {
+					upsInfo.InputVoltage = inputVoltage
+				}
+				for _, command := range liveDetail.Commands {
+					trimmedName := strings.TrimSpace(command.Name)
+					if trimmedName == "" {
+						continue
+					}
+					upsInfo.Commands = append(upsInfo.Commands, controllermqtt.CommandInfo{Name: trimmedName, Description: strings.TrimSpace(command.Description)})
+				}
+			} else if detailErr == nil {
+				if inputVoltage := parseFloatVariable(storedDetail.Variables["input.voltage"]); inputVoltage != nil {
 					upsInfo.InputVoltage = inputVoltage
 				}
 			}
@@ -1228,19 +1550,32 @@ func (a *app) adoptNode(ctx context.Context, r *http.Request, node nodeResponse)
 		return adoptNodeResponse{}, err
 	}
 	url := fmt.Sprintf("http://%s:%d/adopt", node.Address, node.Port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return adoptNodeResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return adoptNodeResponse{}, fmt.Errorf("call node adopt endpoint: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	var resp *http.Response
+	for attempt := 1; attempt <= adoptRequestMaxAttempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if reqErr != nil {
+			return adoptNodeResponse{}, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err = a.client.Do(req)
+		if err != nil {
+			if attempt < adoptRequestMaxAttempts && shouldRetryAdoptTransportError(ctx, err) {
+				if waitErr := waitForRetry(ctx, time.Duration(attempt)*adoptRetryBackoff); waitErr != nil {
+					return adoptNodeResponse{}, fmt.Errorf("call node adopt endpoint: %w", err)
+				}
+				continue
+			}
+			return adoptNodeResponse{}, fmt.Errorf("call node adopt endpoint: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
 		message := decodeNodeError(resp)
+		resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusConflict:
 			if message == "" {
@@ -1248,12 +1583,22 @@ func (a *app) adoptNode(ctx context.Context, r *http.Request, node nodeResponse)
 			}
 			return adoptNodeResponse{}, fmt.Errorf("%w: %s", errNodeAlreadyAdopted, message)
 		default:
+			if attempt < adoptRequestMaxAttempts && shouldRetryAdoptStatus(resp.StatusCode) {
+				if waitErr := waitForRetry(ctx, time.Duration(attempt)*adoptRetryBackoff); waitErr != nil {
+					if message != "" {
+						return adoptNodeResponse{}, fmt.Errorf("node adopt rejected: %s", message)
+					}
+					return adoptNodeResponse{}, fmt.Errorf("node adopt rejected with status %d", resp.StatusCode)
+				}
+				continue
+			}
 			if message != "" {
 				return adoptNodeResponse{}, fmt.Errorf("node adopt rejected: %s", message)
 			}
 			return adoptNodeResponse{}, fmt.Errorf("node adopt rejected with status %d", resp.StatusCode)
 		}
 	}
+	defer resp.Body.Close()
 	var adoptResp agentAdoptResponse
 	if err := json.NewDecoder(resp.Body).Decode(&adoptResp); err != nil {
 		return adoptNodeResponse{}, fmt.Errorf("decode node adopt response: %w", err)
@@ -1289,6 +1634,43 @@ func (a *app) adoptNode(ctx context.Context, r *http.Request, node nodeResponse)
 	updated.Adopted = true
 	updated.Status = "adopted-online"
 	return adoptNodeResponse{Node: updated, TokenSHA256: adoptResp.TokenSHA256, NUTUser: payload.NUTUser}, nil
+}
+
+func shouldRetryAdoptTransportError(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return true
+}
+
+func shouldRetryAdoptStatus(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (a *app) fetchTrustedNodeHealth(ctx context.Context, id string) (trustedNodeHealthResponse, error) {

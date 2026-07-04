@@ -85,6 +85,12 @@ export type AlertEvent = {
   delivery_error?: string;
 };
 
+export type ControllerSettings = {
+  aggregate_nut_enabled: boolean;
+  aggregate_nut_listen: string;
+  aggregate_nut_active: boolean;
+};
+
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: {
@@ -165,4 +171,15 @@ export function deleteAlertRule(id: number) {
 
 export function testAlertRule(id: number) {
   return requestJSON<AlertEvent>(`/api/alerts/rules/${id}/test`, { method: "POST" });
+}
+
+export function fetchControllerSettings() {
+  return requestJSON<ControllerSettings>("/api/settings/controller");
+}
+
+export function updateControllerSettings(payload: { aggregate_nut_enabled?: boolean; aggregate_nut_listen?: string }) {
+  return requestJSON<ControllerSettings>("/api/settings/controller", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }

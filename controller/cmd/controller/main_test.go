@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -21,6 +22,7 @@ import (
 	"unsafe"
 
 	"github.com/Foehammer82/wattkeeper/agent/nodeapi"
+	"github.com/Foehammer82/wattkeeper/controller/internal/aggregatenut"
 	"github.com/Foehammer82/wattkeeper/controller/internal/alerts"
 	"github.com/Foehammer82/wattkeeper/controller/internal/browse"
 	"github.com/Foehammer82/wattkeeper/controller/internal/ca"
@@ -178,6 +180,69 @@ func TestAdoptNodeReturnsConflictWhenAgentIsAlreadyAdopted(t *testing.T) {
 	}
 }
 
+func TestAdoptNodeRetriesTransientTimeout(t *testing.T) {
+	t.Parallel()
+
+	tlsAgent := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Fatalf("missing bearer token: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer tlsAgent.Close()
+	tlsHostPort := strings.TrimPrefix(tlsAgent.URL, "https://")
+	_, tlsPortText, _ := strings.Cut(tlsHostPort, ":")
+	tlsPort, err := strconv.Atoi(tlsPortText)
+	if err != nil {
+		t.Fatalf("parse TLS port: %v", err)
+	}
+	fingerprint := computeFingerprintHex(tlsAgent.Certificate().Raw)
+
+	attempts := 0
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			time.Sleep(220 * time.Millisecond)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(agentAdoptResponse{
+			Serial:         "serial-1234",
+			Version:        "v0.3.0",
+			ControllerURL:  "http://controller.local",
+			TLSPort:        tlsPort,
+			TLSFingerprint: fingerprint,
+			TokenSHA256:    "fingerprint",
+		})
+	}))
+	defer agent.Close()
+
+	hostPort := strings.TrimPrefix(agent.URL, "http://")
+	host, portText, _ := strings.Cut(hostPort, ":")
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	application, _ := newTestAppWithDiscoveredNode(t, agent.URL, nil)
+	application.client = &http.Client{Timeout: 100 * time.Millisecond}
+
+	request := httptest.NewRequest(http.MethodPost, "http://controller.local/api/nodes/serial-1234/adopt", nil)
+	response, err := application.adoptNode(context.Background(), request, nodeResponse{
+		ID:      "serial-1234",
+		Address: host,
+		Port:    port,
+		Live:    true,
+	})
+	if err != nil {
+		t.Fatalf("adoptNode() error = %v", err)
+	}
+	if !response.Node.Adopted {
+		t.Fatalf("response = %#v, want adopted node", response)
+	}
+	if attempts < 2 {
+		t.Fatalf("attempts = %d, want retry", attempts)
+	}
+}
+
 func TestFetchTrustedNodeHealthRejectsBadStoredToken(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +270,39 @@ func TestFetchTrustedNodeHealthRejectsBadStoredToken(t *testing.T) {
 	application.handleTrustedNodeHealth(recorder, req)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	}
+}
+
+func TestSyncLiveNodesPreservesPersistedAdoptedState(t *testing.T) {
+	t.Parallel()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+
+	setBrowserSnapshot(t, application.browser, browse.LiveNode{
+		ID:       "serial-1234",
+		Instance: "seed-wattkeeper-agent",
+		Hostname: "wattkeeper-agent",
+		Address:  "172.20.0.2",
+		Port:     80,
+		Version:  "dev",
+		UPSCount: 2,
+		Adopted:  false,
+		LastSeen: time.Now().UTC(),
+	})
+
+	if err := application.syncLiveNodes(context.Background()); err != nil {
+		t.Fatalf("syncLiveNodes() error = %v", err)
+	}
+
+	node, err := store.GetNode(context.Background(), "serial-1234")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if !node.Adopted {
+		t.Fatalf("node.Adopted = %t, want true", node.Adopted)
 	}
 }
 
@@ -447,10 +545,10 @@ func TestBuildNodeResponseIncludesLatestUPSSummaries(t *testing.T) {
 			Name:   "ups-a",
 			Driver: "usbhid-ups",
 			Variables: map[string]string{
-				"ups.status":       "OL",
-				"battery.charge":   "98",
-				"ups.load":         "34",
-				"battery.runtime":  "1800",
+				"ups.status":      "OL",
+				"battery.charge":  "98",
+				"ups.load":        "34",
+				"battery.runtime": "1800",
 			},
 		},
 	}); err != nil {
@@ -566,8 +664,8 @@ func TestHandleNodeUPSReturnsLiveTrustedDetailAndRunsCommand(t *testing.T) {
 					"battery_charge_percent": 97,
 				},
 				"variables": map[string]string{"battery.charge": "97", "ups.status": "OL"},
-				"commands": []map[string]any{{"name": "test.battery.start.quick", "description": "Quick self test", "destructive": false}},
-				"writable": []map[string]any{{"name": "ups.delay.shutdown", "editor": "RANGE", "current_value": "120"}},
+				"commands":  []map[string]any{{"name": "test.battery.start.quick", "description": "Quick self test", "destructive": false}},
+				"writable":  []map[string]any{{"name": "ups.delay.shutdown", "editor": "RANGE", "current_value": "120"}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/ups/ups-a/command":
 			var request map[string]string
@@ -704,6 +802,216 @@ func TestHandleAlertRulesCRUDAndEvents(t *testing.T) {
 	application.handleAlertRules(deleteRecorder, deleteReq)
 	if deleteRecorder.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d, want %d body=%s", deleteRecorder.Code, http.StatusNoContent, deleteRecorder.Body.String())
+	}
+}
+
+func TestHandleControllerSettingsUpdatesAggregateListener(t *testing.T) {
+	t.Parallel()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	application.aggregate = aggregatenut.NewManager(nil)
+	if err := application.aggregate.Apply(context.Background(), true, "127.0.0.1:0"); err != nil {
+		t.Fatalf("aggregate.Apply(start) error = %v", err)
+	}
+	t.Cleanup(application.aggregate.Close)
+	if err := store.SaveControllerSettings(context.Background(), registry.ControllerSettings{AggregateNUTEnabled: true, AggregateNUTListen: "127.0.0.1:0"}); err != nil {
+		t.Fatalf("SaveControllerSettings() seed error = %v", err)
+	}
+
+	getRecorder := httptest.NewRecorder()
+	application.handleControllerSettings(getRecorder, httptest.NewRequest(http.MethodGet, "http://controller.local/api/settings/controller", nil))
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d body=%s", getRecorder.Code, http.StatusOK, getRecorder.Body.String())
+	}
+	var getResponse controllerSettingsResponse
+	if err := json.Unmarshal(getRecorder.Body.Bytes(), &getResponse); err != nil {
+		t.Fatalf("Unmarshal(getResponse) error = %v", err)
+	}
+	if !getResponse.AggregateNUTEnabled || !getResponse.AggregateNUTActive {
+		t.Fatalf("GET response = %#v, want enabled active listener", getResponse)
+	}
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/settings/controller", strings.NewReader(`{"aggregate_nut_enabled":false}`))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchRecorder := httptest.NewRecorder()
+	application.handleControllerSettings(patchRecorder, patchReq)
+	if patchRecorder.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want %d body=%s", patchRecorder.Code, http.StatusOK, patchRecorder.Body.String())
+	}
+	var patchResponse controllerSettingsResponse
+	if err := json.Unmarshal(patchRecorder.Body.Bytes(), &patchResponse); err != nil {
+		t.Fatalf("Unmarshal(patchResponse) error = %v", err)
+	}
+	if patchResponse.AggregateNUTEnabled || patchResponse.AggregateNUTActive {
+		t.Fatalf("PATCH response = %#v, want disabled inactive listener", patchResponse)
+	}
+
+	persisted, err := store.LoadControllerSettings(context.Background(), registry.ControllerSettings{AggregateNUTEnabled: true, AggregateNUTListen: ":3493"})
+	if err != nil {
+		t.Fatalf("LoadControllerSettings() error = %v", err)
+	}
+	if persisted.AggregateNUTEnabled {
+		t.Fatalf("persisted settings = %#v, want aggregate listener disabled", persisted)
+	}
+}
+
+func TestAggregateNUTProtocolListsUPSAndRunsTrustedInstcmd(t *testing.T) {
+	t.Parallel()
+
+	tlsAgent := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer expected-token" {
+			writeJSONError(w, http.StatusUnauthorized, "invalid bearer token")
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/ups/ups-a" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":   "ups-a",
+				"driver": "usbhid-ups",
+				"status": "OL",
+				"metrics": map[string]any{
+					"name":                   "ups-a",
+					"driver":                 "usbhid-ups",
+					"status":                 "OL",
+					"battery_charge_percent": 95,
+				},
+				"variables": map[string]string{"battery.charge": "95", "ups.status": "OL"},
+				"commands":  []map[string]any{{"name": "test.battery.start.quick", "description": "Quick self test", "destructive": false}},
+				"writable":  []map[string]any{},
+			})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/ups/ups-a/command" {
+			var request map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode command request: %v", err)
+			}
+			if request["cmd"] != "test.battery.start.quick" {
+				t.Fatalf("command request = %#v, want test.battery.start.quick", request)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ups": "ups-a", "command": "test.battery.start.quick", "output": "OK"})
+			return
+		}
+		writeJSONError(w, http.StatusNotFound, "not found")
+	}))
+	defer tlsAgent.Close()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	hostPort := strings.TrimPrefix(tlsAgent.URL, "https://")
+	host, _, _ := strings.Cut(hostPort, ":")
+	if err := store.UpsertDiscoveredNode(context.Background(), registry.Node{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertDiscoveredNode() refresh error = %v", err)
+	}
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	if err := saveTestTrust(t, application, store, tlsAgent, "expected-token"); err != nil {
+		t.Fatalf("saveTestTrust() error = %v", err)
+	}
+	if err := store.RecordUPSSnapshots(context.Background(), "serial-1234", time.Now().UTC(), []registry.UPSSnapshot{{Name: "ups-a", Driver: "usbhid-ups", Variables: map[string]string{"battery.charge": "95", "ups.status": "OL"}}}); err != nil {
+		t.Fatalf("RecordUPSSnapshots() error = %v", err)
+	}
+
+	application.aggregate = aggregatenut.NewManager(nil)
+	application.aggregate.SetBackend(&aggregateNUTBackend{app: application})
+	application.aggregate.SetAuthenticator(func(username, password string) bool {
+		return username == "controller" && password == "secret"
+	})
+	t.Cleanup(application.aggregate.Close)
+	if err := application.aggregate.Apply(context.Background(), true, "127.0.0.1:0"); err != nil {
+		t.Fatalf("aggregate.Apply(start) error = %v", err)
+	}
+	_, listen, active := application.aggregate.Status()
+	if !active {
+		t.Fatalf("aggregate listener active = %t, want true", active)
+	}
+
+	conn, err := net.DialTimeout("tcp", listen, 2*time.Second)
+	if err != nil {
+		t.Fatalf("DialTimeout() error = %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	for _, command := range []string{"USERNAME controller\n", "PASSWORD secret\n"} {
+		if _, err := conn.Write([]byte(command)); err != nil {
+			t.Fatalf("Write(%q) error = %v", strings.TrimSpace(command), err)
+		}
+		response, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("ReadString(%q) error = %v", strings.TrimSpace(command), readErr)
+		}
+		if response != "OK\n" {
+			t.Fatalf("auth response = %q, want OK", response)
+		}
+	}
+
+	if _, err := conn.Write([]byte("LIST UPS\n")); err != nil {
+		t.Fatalf("Write(LIST UPS) error = %v", err)
+	}
+	begin, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(begin LIST UPS) error = %v", err)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(UPS line) error = %v", err)
+	}
+	end, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(end LIST UPS) error = %v", err)
+	}
+	if begin != "BEGIN LIST UPS\n" || !strings.HasPrefix(line, "UPS serial_1234__ups_a ") || end != "END LIST UPS\n" {
+		t.Fatalf("LIST UPS response unexpected: %q%q%q", begin, line, end)
+	}
+
+	if _, err := conn.Write([]byte("LIST CMD serial_1234__ups_a\n")); err != nil {
+		t.Fatalf("Write(LIST CMD) error = %v", err)
+	}
+	begin, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(begin LIST CMD) error = %v", err)
+	}
+	line, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(CMD line) error = %v", err)
+	}
+	end, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(end LIST CMD) error = %v", err)
+	}
+	if begin != "BEGIN LIST CMD serial_1234__ups_a\n" || line != "CMD serial_1234__ups_a test.battery.start.quick\n" || end != "END LIST CMD serial_1234__ups_a\n" {
+		t.Fatalf("LIST CMD response unexpected: %q%q%q", begin, line, end)
+	}
+
+	if _, err := conn.Write([]byte("GET CMDDESC serial_1234__ups_a test.battery.start.quick\n")); err != nil {
+		t.Fatalf("Write(GET CMDDESC) error = %v", err)
+	}
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(GET CMDDESC) error = %v", err)
+	}
+	if response != "CMDDESC serial_1234__ups_a test.battery.start.quick \"Quick self test\"\n" {
+		t.Fatalf("GET CMDDESC response = %q, want command description", response)
+	}
+
+	if _, err := conn.Write([]byte("INSTCMD serial_1234__ups_a test.battery.start.quick\n")); err != nil {
+		t.Fatalf("Write(INSTCMD) error = %v", err)
+	}
+	response, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString(INSTCMD) error = %v", err)
+	}
+	if response != "OK\n" {
+		t.Fatalf("INSTCMD response = %q, want OK", response)
 	}
 }
 
@@ -862,13 +1170,20 @@ func newTestAppWithDiscoveredNode(t *testing.T, agentURL string, tlsAgent *httpt
 	if tlsAgent != nil {
 		client = tlsAgent.Client()
 	}
-	return &app{
-		registry: store,
-		browser:  browse.New(nil),
-		ca:       authority,
-		client:   client,
-		vault:    vault,
-	}, store
+	application := &app{
+		config: config{
+			aggregateNUTEnabled: true,
+			aggregateNUTListen:  ":3493",
+		},
+		registry:  store,
+		browser:   browse.New(nil),
+		ca:        authority,
+		client:    client,
+		vault:     vault,
+		aggregate: aggregatenut.NewManager(nil),
+	}
+	t.Cleanup(application.aggregate.Close)
+	return application, store
 }
 
 func saveTestTrust(t *testing.T, application *app, store *registry.Store, tlsAgent *httptest.Server, apiToken string) error {

@@ -49,8 +49,10 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Features: features.md
+  - Home Assistant: home-assistant.md
   - FAQ: faq.md
   - Reference:
       - Overview: reference/index.md
       - Agent: reference/agent.md
+      - Controller Architecture Decisions: reference/architecture-decisions.md
       - Image And Flashing: reference/image.md

@@ -2,8 +2,13 @@ package browse
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,21 +52,53 @@ type LiveNode struct {
 type Browser struct {
 	logger   *log.Logger
 	resolver resolver
+	client   *http.Client
+	seeds    []seedTarget
 
 	mu    sync.RWMutex
 	nodes map[string]LiveNode
 }
 
+type seedTarget struct {
+	host string
+	port int
+}
+
+type seedHealthResponse struct {
+	Version string `json:"version"`
+	Serial  string `json:"serial"`
+	UPSes   []any  `json:"upses"`
+}
+
 func New(logger *log.Logger) *Browser {
-	return &Browser{logger: logger, resolver: zeroconfResolver{}, nodes: map[string]LiveNode{}}
+	return &Browser{
+		logger:   logger,
+		resolver: zeroconfResolver{},
+		client:   &http.Client{Timeout: 3 * time.Second},
+		nodes:    map[string]LiveNode{},
+	}
+}
+
+func (b *Browser) ConfigureSeeds(raw string) {
+	b.seeds = parseSeedTargets(raw)
 }
 
 func (b *Browser) Start(ctx context.Context) error {
 	entries := make(chan *zeroconf.ServiceEntry)
 	if err := b.resolver.Browse(ctx, defaultService, defaultDomain, entries); err != nil {
-		return err
+		if len(b.seeds) == 0 {
+			return err
+		}
+		if b.logger != nil {
+			b.logger.Printf("mDNS browse unavailable, using discovery seeds only: %v", err)
+		}
+	} else {
+		go b.consume(ctx, entries)
 	}
-	go b.consume(ctx, entries)
+
+	if len(b.seeds) > 0 {
+		go b.seedLoop(ctx)
+	}
 	return nil
 }
 
@@ -151,4 +188,110 @@ func normalizeIP(address net.IP) string {
 		return ""
 	}
 	return address.String()
+}
+
+func parseSeedTargets(raw string) []seedTarget {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	targets := make([]seedTarget, 0, len(parts))
+	for _, part := range parts {
+		text := strings.TrimSpace(part)
+		if text == "" {
+			continue
+		}
+		host, portText, ok := strings.Cut(text, ":")
+		if !ok {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(portText))
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		targets = append(targets, seedTarget{host: host, port: port})
+	}
+	return targets
+}
+
+func (b *Browser) seedLoop(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	b.updateSeedNodes(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.updateSeedNodes(ctx)
+		}
+	}
+}
+
+func (b *Browser) updateSeedNodes(ctx context.Context) {
+	for _, target := range b.seeds {
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", target.host)
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			ipText := strings.TrimSpace(ip.String())
+			if ipText == "" {
+				continue
+			}
+			if parsed, parseErr := netip.ParseAddr(ipText); parseErr == nil && parsed.IsLoopback() {
+				continue
+			}
+			node, ok := b.fetchSeedNode(ctx, target, ipText)
+			if !ok {
+				continue
+			}
+			b.mu.Lock()
+			b.nodes[node.ID] = node
+			b.mu.Unlock()
+		}
+	}
+}
+
+func (b *Browser) fetchSeedNode(ctx context.Context, target seedTarget, address string) (LiveNode, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:%d/healthz", address, target.port), nil)
+	if err != nil {
+		return LiveNode{}, false
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return LiveNode{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return LiveNode{}, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return LiveNode{}, false
+	}
+	var health seedHealthResponse
+	if err := json.Unmarshal(body, &health); err != nil {
+		return LiveNode{}, false
+	}
+	serial := strings.TrimSpace(health.Serial)
+	if serial == "" {
+		return LiveNode{}, false
+	}
+	return LiveNode{
+		ID:       serial,
+		Instance: "seed-" + target.host,
+		Hostname: target.host,
+		Address:  address,
+		Port:     target.port,
+		Version:  strings.TrimSpace(health.Version),
+		UPSCount: len(health.UPSes),
+		Adopted:  false,
+		LastSeen: time.Now().UTC(),
+	}, true
 }

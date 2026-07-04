@@ -34,14 +34,22 @@ This page separates what Wattkeeper ships today from what is still planned.
 - exposes recent UPS summaries, per-UPS detail/history APIs, and trusted instant commands
 - evaluates webhook alert rules for on-battery, low-battery, node-offline, and comms-lost conditions
 - serves a GUI-driven React fleet interface with fleet, node, UPS, and alerts views
+- re-serves adopted UPS inventory through a controller aggregate NUT listener on `:3493`
+  with protocol support for `LIST UPS`, `LIST VAR`, `GET VAR`, `LIST CMD`,
+  `GET CMDDESC`, and `INSTCMD`
+- provides a controller settings UI control to enable or disable the aggregate
+  NUT listener without restarting the controller
 
 ## Planned Features
 
 ### Home Assistant Bridge
 
-- MQTT publishing
-- Home Assistant discovery entities
-- UPS diagnostic and control integration
+- In progress in Phase 4:
+  - retained MQTT discovery and state publishing
+  - per-node availability and controller availability topics
+  - button command topic bridging to trusted UPS commands
+  - aggregate NUT server mode for native NUT clients
+  - setup and integration guidance in [Home Assistant Setup](home-assistant.md)
 
 ### Lifecycle And Hardening
 
@@ -58,6 +66,6 @@ This page separates what Wattkeeper ships today from what is still planned.
 
 ## Current Limitations
 
-- Home Assistant integration is not yet available
+- Home Assistant integration is in progress and not yet complete against full Phase 4 exit criteria
 - Phase 3 still needs real-hardware validation against its exit criteria
 - MQTT alert delivery is deferred to the Home Assistant bridge phase

@@ -5,8 +5,9 @@ This section collects the current operational reference material for Wattkeeper.
 ## Pages
 
 - [Agent](agent.md): current node-agent responsibilities and runtime behavior
+- [Controller Architecture Decisions](architecture-decisions.md): datastore, discovery, and messaging strategy for the next 6-12 months
 - [Image And Flashing](image.md): image artifact naming, checksum validation, and flashing details
 
 ## Scope
 
-The reference pages describe what exists in the current repository. Controller behavior now ships in the repo; the Home Assistant bridge remains intentionally documented at a high level until Phase 4.
+The reference pages describe what exists in the current repository. Controller behavior now ships in the repo, and Home Assistant bridge setup now has a dedicated guide in [Home Assistant Setup](../home-assistant.md).

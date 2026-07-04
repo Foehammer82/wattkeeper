@@ -12,12 +12,12 @@ Today that means:
 
 - Raspberry Pi nodes auto-detect USB UPS hardware, generate NUT configuration, advertise themselves over mDNS, and expose a branded local dashboard with live telemetry and UPS control actions.
 - The image pipeline builds a flashable Raspberry Pi OS Lite image for node deployment.
-- The controller can discover nodes, persist them in SQLite, adopt pending nodes, forget stale node records, store controller-managed node display/location metadata, establish node-local trust material, poll adopted-node NUT variables into SQLite, expose recent UPS telemetry plus per-UPS detail/history APIs and trusted controller-side UPS commands, evaluate webhook alert rules, and serve a branded React controller GUI. Adopted nodes can be returned to pending state with `wattkeeper-agent reset` on the node.
+- The controller can discover nodes, persist them in SQLite, adopt pending nodes, forget stale node records, store controller-managed node display/location metadata, establish node-local trust material, poll adopted-node NUT variables into SQLite, expose recent UPS telemetry plus per-UPS detail/history APIs and trusted controller-side UPS commands, evaluate webhook alert rules, serve a branded React controller GUI, publish Home Assistant MQTT discovery/state payloads when configured with a broker, and re-serve adopted UPSes through an aggregate NUT listener on `:3493` that can be enabled or disabled from controller settings. Adopted nodes can be returned to pending state with `wattkeeper-agent reset` on the node.
 
 What is still ahead:
 
 - Phase 3 hardware validation against the real-node exit criteria
-- The Home Assistant bridge
+- Final Phase 4 validation against a real Home Assistant instance and broker
 - Later lifecycle and hardening work from the roadmap
 
 - [ROADMAP.md](ROADMAP.md) defines the architecture, phases, and exit criteria.
@@ -47,7 +47,7 @@ wattkeeper/
 │   ├── prompts/                # slash-command prompts for roadmap phases
 │   ├── skills/                 # project-specific Copilot skills
 │   └── workflows/
-├── Makefile                    # top-level build/test/image targets
+├── wk                          # top-level developer CLI entrypoint
 ├── agent/                      # Go node agent (runs on the Pi)
 │   ├── cmd/agent/
 │   └── internal/
@@ -111,23 +111,42 @@ This repository now produces versioned agent release artifacts, a flashable Rasp
 You can build the same release payload locally with:
 
 ```sh
-make release-agent VERSION=v0.1.0
-make image VERSION=v0.1.0
-make controller-image VERSION=v0.1.0
+uv run wk release agent --version v0.1.0
+uv run wk image node --version v0.1.0
+uv run wk image controller --version v0.1.0
 ```
 
 For local controller iteration, use:
 
 ```sh
-make controller
-make controller-dev
+uv run wk build controller
+uv run wk dev controller
 ```
 
 Image build prerequisites and the flash workflow are documented in [image/README.md](image/README.md).
 
 The user-facing documentation set lives in [docs/](docs). If you are looking for setup steps, product capabilities, or operational reference material, start there.
 
-Local docs tooling is managed with `uv`. Use `make docs-setup`, `make docs-build`, or `make docs-serve` from the repo root after installing `uv`.
+Local docs and repo tooling are managed with `uv`. Use `uv run wk docs setup`, `uv run wk docs build`, or `uv run wk docs serve` from the repo root after installing `uv`, and use `uv run wk hooks install` or `uv run wk hooks run` for repo hygiene checks.
+
+For the newer project CLI flow, run `wk` from an activated virtual environment, or use `uv run wk` without activating one. Current commands include:
+
+- `wk docs`, `wk docs serve`, `wk docs build`
+- `wk sim up|down|ps|logs`
+- `wk sim smoke [--strict]`
+- `wk sim scenario <name>` (`ci-smoke`, `on_battery`, `restore`, `node_loss`)
+- `wk hooks install|run`
+- `wk build ...`, `wk dev ...`, `wk check ...`, `wk image ...`, `wk release ...`
+
+Examples:
+
+```sh
+uv run wk docs
+uv run wk sim smoke --strict --replicas 2
+uv run wk sim up --replicas 2
+wk sim logs --service wattkeeper-controller --tail 200
+wk hooks run
+```
 
 For the current user-facing path, start with:
 

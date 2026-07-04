@@ -304,3 +304,34 @@ func TestStoreUpsertAndListNodes(t *testing.T) {
 		t.Fatalf("LoadNodeTrust() after delete error = %v, want ErrNodeNotFound", err)
 	}
 }
+
+func TestControllerSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	defaults := ControllerSettings{AggregateNUTEnabled: true, AggregateNUTListen: ":3493"}
+	loaded, err := store.LoadControllerSettings(context.Background(), defaults)
+	if err != nil {
+		t.Fatalf("LoadControllerSettings() defaults error = %v", err)
+	}
+	if loaded != defaults {
+		t.Fatalf("loaded defaults = %#v, want %#v", loaded, defaults)
+	}
+
+	next := ControllerSettings{AggregateNUTEnabled: false, AggregateNUTListen: "127.0.0.1:3493"}
+	if err := store.SaveControllerSettings(context.Background(), next); err != nil {
+		t.Fatalf("SaveControllerSettings() error = %v", err)
+	}
+	reloaded, err := store.LoadControllerSettings(context.Background(), defaults)
+	if err != nil {
+		t.Fatalf("LoadControllerSettings() persisted error = %v", err)
+	}
+	if reloaded != next {
+		t.Fatalf("reloaded settings = %#v, want %#v", reloaded, next)
+	}
+}

@@ -25,6 +25,7 @@ type RuntimeConfig struct {
 	ClientID        string
 	Heartbeat       time.Duration
 	KeepAlive       uint16
+	CommandHandler  CommandHandler
 }
 
 type NodeSnapshot struct {
@@ -32,9 +33,19 @@ type NodeSnapshot struct {
 	UPSes []UPSInfo
 }
 
+type CommandRequest struct {
+	NodeID  string
+	UPSName string
+	Command string
+}
+
+type CommandHandler func(context.Context, CommandRequest) error
+
 type publishClient interface {
 	AwaitConnection(context.Context) error
 	Publish(context.Context, *paho.Publish) (*paho.PublishResponse, error)
+	Subscribe(context.Context, *paho.Subscribe) (*paho.Suback, error)
+	AddOnPublishReceived(func(autopaho.PublishReceived) (bool, error)) func()
 }
 
 type publishedState struct {
@@ -43,13 +54,22 @@ type publishedState struct {
 }
 
 type Publisher struct {
-	logger    *log.Logger
-	cfg       RuntimeConfig
-	client    publishClient
-	now       func() time.Time
-	mu        sync.Mutex
-	published map[string]publishedState
-	discovery map[string]struct{}
+	logger     *log.Logger
+	cfg        RuntimeConfig
+	client     publishClient
+	now        func() time.Time
+	handler    CommandHandler
+	mu         sync.Mutex
+	published  map[string]publishedState
+	discovery  map[string]struct{}
+	routes     map[string]commandRoute
+	subscribed bool
+}
+
+type commandRoute struct {
+	nodeID   string
+	upsName  string
+	commands map[string]string
 }
 
 func NewPublisher(ctx context.Context, logger *log.Logger, cfg RuntimeConfig) (*Publisher, error) {
@@ -87,7 +107,7 @@ func NewPublisher(ctx context.Context, logger *log.Logger, cfg RuntimeConfig) (*
 	if err != nil {
 		return nil, fmt.Errorf("create mqtt connection: %w", err)
 	}
-	return &Publisher{
+	publisher := &Publisher{
 		logger: logger,
 		cfg: RuntimeConfig{
 			BrokerURL: cfg.BrokerURL, Username: cfg.Username, Password: cfg.Password,
@@ -99,13 +119,17 @@ func NewPublisher(ctx context.Context, logger *log.Logger, cfg RuntimeConfig) (*
 		},
 		client:    cm,
 		now:       time.Now,
+		handler:   cfg.CommandHandler,
 		published: map[string]publishedState{},
 		discovery: map[string]struct{}{},
-	}, nil
+		routes:    map[string]commandRoute{},
+	}
+	publisher.registerReceiver()
+	return publisher, nil
 }
 
 func NewTestPublisher(cfg RuntimeConfig, client publishClient, now func() time.Time) *Publisher {
-	return &Publisher{
+	publisher := &Publisher{
 		cfg: RuntimeConfig{
 			DiscoveryPrefix: defaultString(strings.TrimSpace(cfg.DiscoveryPrefix), defaultDiscoveryPrefix),
 			StatePrefix:     defaultString(strings.TrimSpace(cfg.StatePrefix), defaultStatePrefix),
@@ -118,9 +142,13 @@ func NewTestPublisher(cfg RuntimeConfig, client publishClient, now func() time.T
 			}
 			return time.Now()
 		},
+		handler:   cfg.CommandHandler,
 		published: map[string]publishedState{},
 		discovery: map[string]struct{}{},
+		routes:    map[string]commandRoute{},
 	}
+	publisher.registerReceiver()
+	return publisher
 }
 
 func (p *Publisher) PublishSnapshots(ctx context.Context, snapshots []NodeSnapshot) error {
@@ -130,7 +158,11 @@ func (p *Publisher) PublishSnapshots(ctx context.Context, snapshots []NodeSnapsh
 	if err := p.client.AwaitConnection(ctx); err != nil {
 		return err
 	}
-	if err := p.publish(ctx, PublishMessage{Topic: p.cfg.StatePrefix + "/controller/availability", Payload: []byte("online"), Retain: true}, true); err != nil {
+	if err := p.ensureCommandSubscription(ctx); err != nil {
+		return err
+	}
+	p.updateRoutes(snapshots)
+	if err := p.publish(ctx, PublishMessage{Topic: p.cfg.StatePrefix + "/controller/availability", Payload: []byte("online"), Retain: true}, false); err != nil {
 		return err
 	}
 	for _, snapshot := range snapshots {
@@ -161,6 +193,120 @@ func (p *Publisher) PublishSnapshots(ctx context.Context, snapshots []NodeSnapsh
 		}
 	}
 	return nil
+}
+
+func (p *Publisher) ensureCommandSubscription(ctx context.Context) error {
+	p.mu.Lock()
+	if p.subscribed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
+
+	subscription := &paho.Subscribe{Subscriptions: []paho.SubscribeOptions{{Topic: p.commandSubscriptionTopic(), QoS: 1}}}
+	if _, err := p.client.Subscribe(ctx, subscription); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.subscribed = true
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *Publisher) registerReceiver() {
+	if p == nil || p.client == nil || p.handler == nil {
+		return
+	}
+	p.client.AddOnPublishReceived(func(received autopaho.PublishReceived) (bool, error) {
+		packet := received.Packet
+		if packet == nil {
+			return false, nil
+		}
+		topic := strings.TrimSpace(packet.Topic)
+		if !strings.HasPrefix(topic, p.cfg.StatePrefix+"/nodes/") || !strings.HasSuffix(topic, "/command") {
+			return false, nil
+		}
+		command := strings.TrimSpace(string(packet.Payload))
+		if command == "" {
+			return true, nil
+		}
+		target, mappedCommand, ok := p.lookupRoute(topic, command)
+		if !ok {
+			if p.logger != nil {
+				p.logger.Printf("mqtt command ignored topic=%s command=%s", topic, command)
+			}
+			return true, nil
+		}
+		go func() {
+			commandCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err := p.handler(commandCtx, CommandRequest{NodeID: target.nodeID, UPSName: target.upsName, Command: mappedCommand})
+			if err != nil {
+				if p.logger != nil {
+					p.logger.Printf("mqtt command failed node=%s ups=%s command=%s err=%v", target.nodeID, target.upsName, mappedCommand, err)
+				}
+				return
+			}
+			if p.logger != nil {
+				p.logger.Printf("mqtt command executed node=%s ups=%s command=%s", target.nodeID, target.upsName, mappedCommand)
+			}
+		}()
+		return true, nil
+	})
+}
+
+func (p *Publisher) commandSubscriptionTopic() string {
+	return p.cfg.StatePrefix + "/nodes/+/ups/+/command"
+}
+
+func (p *Publisher) updateRoutes(snapshots []NodeSnapshot) {
+	routes := make(map[string]commandRoute)
+	for _, snapshot := range snapshots {
+		nodeID := strings.TrimSpace(snapshot.Node.ID)
+		if nodeID == "" {
+			continue
+		}
+		for _, ups := range snapshot.UPSes {
+			upsName := strings.TrimSpace(ups.Name)
+			if upsName == "" {
+				continue
+			}
+			topic := p.cfg.StatePrefix + "/nodes/" + slug(nodeID) + "/ups/" + slug(upsName) + "/command"
+			route := commandRoute{
+				nodeID:   nodeID,
+				upsName:  upsName,
+				commands: map[string]string{},
+			}
+			for _, command := range ups.Commands {
+				trimmed := strings.TrimSpace(command.Name)
+				if trimmed == "" {
+					continue
+				}
+				route.commands[strings.ToLower(trimmed)] = trimmed
+			}
+			routes[topic] = route
+		}
+	}
+	p.mu.Lock()
+	p.routes = routes
+	p.mu.Unlock()
+}
+
+func (p *Publisher) lookupRoute(topic, command string) (commandRoute, string, bool) {
+	p.mu.Lock()
+	route, ok := p.routes[topic]
+	p.mu.Unlock()
+	if !ok {
+		return commandRoute{}, "", false
+	}
+	if len(route.commands) == 0 {
+		return route, command, true
+	}
+	mappedCommand, ok := route.commands[strings.ToLower(strings.TrimSpace(command))]
+	if !ok {
+		return commandRoute{}, "", false
+	}
+	return route, mappedCommand, true
 }
 
 func (p *Publisher) publish(ctx context.Context, message PublishMessage, discovery bool) error {

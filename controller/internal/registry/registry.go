@@ -134,6 +134,11 @@ type AlertEvent struct {
 	DeliveryError string    `json:"delivery_error,omitempty"`
 }
 
+type ControllerSettings struct {
+	AggregateNUTEnabled bool
+	AggregateNUTListen  string
+}
+
 type Store struct {
 	db *sql.DB
 }
@@ -699,6 +704,78 @@ func (s *Store) LastAlertEvent(ctx context.Context, ruleID int64, subjectKey str
 		return AlertEvent{}, false, err
 	}
 	return event, true, nil
+}
+
+func (s *Store) LoadControllerSettings(ctx context.Context, defaults ControllerSettings) (ControllerSettings, error) {
+	settings := ControllerSettings{
+		AggregateNUTEnabled: defaults.AggregateNUTEnabled,
+		AggregateNUTListen:  strings.TrimSpace(defaults.AggregateNUTListen),
+	}
+	if settings.AggregateNUTListen == "" {
+		settings.AggregateNUTListen = ":3493"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM controller_settings`)
+	if err != nil {
+		return ControllerSettings{}, fmt.Errorf("list controller settings: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return ControllerSettings{}, fmt.Errorf("scan controller setting row: %w", err)
+		}
+		switch key {
+		case "aggregate_nut_enabled":
+			parsed, parseErr := strconv.ParseBool(strings.TrimSpace(value))
+			if parseErr == nil {
+				settings.AggregateNUTEnabled = parsed
+			}
+		case "aggregate_nut_listen":
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				settings.AggregateNUTListen = trimmed
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ControllerSettings{}, fmt.Errorf("iterate controller settings: %w", err)
+	}
+	return settings, nil
+}
+
+func (s *Store) SaveControllerSettings(ctx context.Context, settings ControllerSettings) error {
+	listen := strings.TrimSpace(settings.AggregateNUTListen)
+	if listen == "" {
+		return errors.New("aggregate NUT listen address is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin controller settings transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO controller_settings (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, "aggregate_nut_enabled", strconv.FormatBool(settings.AggregateNUTEnabled), now); err != nil {
+		return fmt.Errorf("save aggregate_nut_enabled: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO controller_settings (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, "aggregate_nut_listen", listen, now); err != nil {
+		return fmt.Errorf("save aggregate_nut_listen: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit controller settings transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListNodeUPSSummaries(ctx context.Context, nodeID string) ([]UPSLatestSample, error) {

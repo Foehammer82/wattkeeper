@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS alert_events (
   FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS controller_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_ups_node_id ON ups(node_id);
 CREATE INDEX IF NOT EXISTS idx_samples_ups_var_time ON samples(ups_id, variable, captured_at);
 CREATE INDEX IF NOT EXISTS idx_alert_events_rule_subject_time ON alert_events(rule_id, subject_key, created_at);

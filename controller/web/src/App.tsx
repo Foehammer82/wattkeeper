@@ -5,6 +5,7 @@ import {
   adoptNode,
   createAlertRule,
   deleteAlertRule,
+  fetchControllerSettings,
   fetchAlertEvents,
   fetchAlertRules,
   fetchNode,
@@ -15,9 +16,11 @@ import {
   forgetNode,
   runUPSCommand,
   testAlertRule,
+  updateControllerSettings,
   updateNode,
   type AlertEvent,
   type AlertRule,
+  type ControllerSettings,
   type NodeHealthResponse,
   type NodeRecord,
   type UPSDetailResponse,
@@ -69,6 +72,7 @@ function App() {
         <nav className="toolbar nav-links">
           <Link className="button button--ghost" to="/">Fleet</Link>
           <Link className="button button--ghost" to="/alerts">Alerts</Link>
+          <Link className="button button--ghost" to="/settings">Settings</Link>
           <button className="button button--ghost" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "Light mode" : "Dark mode"}</button>
         </nav>
       </header>
@@ -78,6 +82,7 @@ function App() {
         <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
         <Route path="/nodes/:nodeID/ups/:upsName" element={<UPSDetailPage onToast={setToast} />} />
         <Route path="/alerts" element={<AlertsPage onToast={setToast} />} />
+        <Route path="/settings" element={<SettingsPage onToast={setToast} />} />
       </Routes>
 
       <div className={`toast${toast ? " is-visible" : ""}`} role="status" aria-live="polite">{toast}</div>
@@ -257,6 +262,125 @@ function NodeCard({ node, onChanged, onToast }: { node: NodeRecord; onChanged: (
         <button className="button button--ghost" type="button" onClick={() => void handleForget()}>Forget node</button>
       </div>
     </article>
+  );
+}
+
+function SettingsPage({ onToast }: { onToast: (message: string) => void }) {
+  const [settings, setSettings] = useState<ControllerSettings | null>(null);
+  const [listen, setListen] = useState(":3493");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const payload = await fetchControllerSettings();
+      setSettings(payload);
+      setListen(payload.aggregate_nut_listen || ":3493");
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unknown error");
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function handleToggle() {
+    if (!settings) {
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await updateControllerSettings({
+        aggregate_nut_enabled: !settings.aggregate_nut_enabled,
+        aggregate_nut_listen: listen,
+      });
+      setSettings(updated);
+      setListen(updated.aggregate_nut_listen);
+      onToast(updated.aggregate_nut_enabled ? "Aggregate NUT listener enabled." : "Aggregate NUT listener disabled.");
+      setError(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unknown error");
+      onToast(saveError instanceof Error ? saveError.message : "Settings update failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleListenSave(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settings) {
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await updateControllerSettings({
+        aggregate_nut_listen: listen,
+      });
+      setSettings(updated);
+      setListen(updated.aggregate_nut_listen);
+      onToast(`Aggregate listener address set to ${updated.aggregate_nut_listen}.`);
+      setError(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unknown error");
+      onToast(saveError instanceof Error ? saveError.message : "Settings update failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="surface fleet-shell">
+      <div className="section-head">
+        <div>
+          <h2>Controller settings</h2>
+          <span className="helper">Global controller controls for aggregate NUT exposure and admin-level operations.</span>
+        </div>
+      </div>
+      {error ? <div className="empty-state"><p>{error}</p></div> : null}
+      {!settings ? (
+        <div className="empty-state"><p>Loading controller settings...</p></div>
+      ) : (
+        <div className="fleet-groups">
+          <section className="group-section">
+            <div className="group-head">
+              <div>
+                <h3>Aggregate NUT listener</h3>
+                <p>Enable or disable the controller aggregate NUT TCP listener on port 3493 without restarting the controller.</p>
+              </div>
+              <span className={`chip ${settings.aggregate_nut_active ? "chip--online" : "chip--offline"}`}>
+                {settings.aggregate_nut_active ? "active" : "inactive"}
+              </span>
+            </div>
+            <div className="cards cards--summary">
+              <article className="card">
+                <span className="eyebrow">Configured state</span>
+                <strong>{settings.aggregate_nut_enabled ? "enabled" : "disabled"}</strong>
+                <p>Persisted setting applied immediately and kept across controller restarts.</p>
+              </article>
+              <article className="card">
+                <span className="eyebrow">Listen address</span>
+                <strong>{settings.aggregate_nut_listen}</strong>
+                <p>Use host:port or :port. Default is :3493.</p>
+              </article>
+            </div>
+            <div className="node-actions">
+              <button className={`button ${settings.aggregate_nut_enabled ? "button--ghost" : "button--primary"}`} type="button" onClick={() => void handleToggle()} disabled={saving}>
+                {saving ? "Applying..." : settings.aggregate_nut_enabled ? "Disable listener" : "Enable listener"}
+              </button>
+            </div>
+            <form className="form-grid" onSubmit={handleListenSave}>
+              <label className="field">
+                <span className="eyebrow">Listener address</span>
+                <input value={listen} onChange={(event) => setListen(event.target.value)} placeholder=":3493" disabled={saving} />
+              </label>
+              <button className="button button--ghost" type="submit" disabled={saving}>Save address</button>
+            </form>
+          </section>
+        </div>
+      )}
+    </section>
   );
 }
 

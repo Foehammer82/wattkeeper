@@ -71,6 +71,9 @@ body {
   background:
     radial-gradient(circle at top left, rgba(255, 255, 255, 0.5), transparent 28%),
     linear-gradient(180deg, var(--wk-bg-alt) 0%, var(--wk-bg) 55%, #efe9df 100%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
 [data-md-color-scheme="slate"] body,
@@ -78,6 +81,9 @@ body[data-md-color-scheme="slate"] {
   background:
     radial-gradient(circle at top left, rgba(122, 209, 194, 0.08), transparent 30%),
     linear-gradient(180deg, #243036 0%, var(--wk-bg) 55%, #1b2125 100%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
 .md-header {

@@ -18,7 +18,7 @@ wattkeeper/
 │   ├── prompts/                # slash-command prompts for roadmap phases
 │   ├── skills/                 # project-specific Copilot skills
 │   └── workflows/
-├── Makefile                    # top-level build/test/image targets
+├── wk                          # top-level developer CLI entrypoint
 ├── agent/                      # Go node agent (runs on the Pi)
 │   ├── cmd/agent/
 │   └── internal/
@@ -42,7 +42,7 @@ wattkeeper/
 ## Phase 0 — Repo scaffold
 
 - [x] Init repo, Go workspace (`go.work`) covering `agent/` and `controller/`
-- [x] Top-level Makefile: `make agent`, `make image`, `make sim-up`, `make test`
+- [x] Top-level CLI workflow: `wk build agent`, `wk image node`, `wk sim up`, `wk check test`
 - [x] CI stub (GitHub Actions): lint + test on push, cross-compile agent for
       `linux/arm64` (Zero 2 W is 64-bit capable) and `linux/arm` (fallback)
 - [x] `.editorconfig`, `gofmt`/`golangci-lint` config
@@ -87,7 +87,7 @@ Goal: one `.img` file. Flash, boot, done.
 - [x] WiFi provisioning: support standard `custom.toml` / Pi Imager style
       config on the boot partition so users set WiFi creds at flash time
       without touching the rootfs
-- [x] `make image` target that runs pi-gen in Docker and drops
+- [x] `wk image node` command that runs pi-gen in Docker and drops
       `wattkeeper-node-vX.Y.Z.img.xz` in `dist/`
 - [x] CI job to build image on tag
 
@@ -97,8 +97,8 @@ ever opened.
 
 While iterating on Phase 2 work locally, validate with this sequence before pushing:
 
-1. Run `make image VERSION=<dev-or-rc-tag>` and confirm it emits `dist/wattkeeper-node-<version>.img.xz` and the matching `.sha256` file.
-2. If a pi-gen run fails mid-build and you are refining the custom stage, use `CONTINUE=1 make image VERSION=<same-tag>` to resume from the preserved `pigen_work` container instead of starting from scratch.
+1. Run `uv run wk image node --version <dev-or-rc-tag>` and confirm it emits `dist/wattkeeper-node-<version>.img.xz` and the matching `.sha256` file.
+2. If a pi-gen run fails mid-build and you are refining the custom stage, use `uv run wk image node --version <same-tag> --continue` to resume from the preserved `pigen_work` container instead of starting from scratch.
 3. Flash the image with Raspberry Pi Imager using WiFi and SSH-key customization, then boot a real Pi Zero 2 W with a USB UPS attached.
 4. Verify the Phase 2 exit behavior on hardware: first-boot hostname rewrite, `/var/lib/wattkeeper` creation, mDNS advertisement, and remote NUT access via `upsc`.
 
@@ -200,16 +200,37 @@ hand-configured, pulling live metrics, instcmd round-trips work.
       Progress so far: the controller now has an `internal/mqtt` package that
       generates Home Assistant discovery/state payloads for adopted UPSes and
       publishes retained discovery, state, and per-node availability messages
-      from the existing poll cycle when an MQTT broker is configured.
-                  Next steps:
-                  - Subscribe for MQTT button command topics and bridge them back to the
-                        trusted controller-side UPS command APIs
-                  - Publish richer live values such as input voltage and any remaining
-                        entity state directly from the controller's latest UPS detail data
-                  - Add controller availability heartbeat/LWT validation against a real broker
+      from the existing poll cycle when an MQTT broker is configured. The
+      bridge now subscribes to MQTT button command topics and routes those
+      commands back to the trusted controller-side UPS command APIs. MQTT
+      snapshots now enrich status/charge/load/runtime/input-voltage from
+      trusted live UPS detail data when available, and controller availability
+      heartbeat republishing is covered by publisher tests.
+      Home Assistant operator setup is now documented in
+      `docs/home-assistant.md`.
+      Next session checklist:
+      - Validate the MQTT bridge end-to-end against a real broker and Home
+        Assistant instance:
+          - controller availability reports `online` while running and flips to
+            `offline` via LWT when stopped
+          - each adopted UPS appears as one HA device with all expected sensor,
+            binary sensor, and button entities
+          - button presses from HA trigger trusted UPS instant commands on the
+            adopted node
+      - If the validation above passes, check off this MQTT checklist item.
+      - Capture any broker/HA quirks discovered during validation in
+        `docs/home-assistant.md`.
 - [ ] aggregate NUT server mode — controller re-serves all
       downstream UPSes on its own :3493 for anything that speaks native NUT
-- [ ] Docs: HA setup guide
+      Next session checklist:
+      - Decide whether to implement this in Phase 4 or defer to a later phase.
+      - If implementing now, define a minimal protocol subset and add focused
+        tests before checking this item off.
+- [x] Docs: HA setup guide
+
+**Session handoff status**: documentation and MQTT command bridging are done;
+the remaining Phase 4 blocker is real broker + Home Assistant validation, then
+decision/implementation for aggregate NUT server mode.
 
 **Exit criteria**: fresh HA instance + MQTT integration → all UPSes appear
 automatically with correct device grouping, controls work.
@@ -265,16 +286,28 @@ automatically with correct device grouping, controls work.
 
 Not required, keep it cheap:
 
-- NUT ships a `dummy-ups` driver that replays a `.dev` file of UPS variables —
-  perfect fake UPS. A container running the agent with `dummy-ups` entries
-  injected (agent gets a `--simulate <dir>` flag that bypasses nut-scanner and
-  treats each `.dev` file as a discovered UPS) simulates a full node without
-  hardware.
-- `docker-compose.yml`: N simulated nodes + controller on one bridge network.
-  mDNS inside Docker needs host networking or an avahi-reflector sidecar —
-  acceptable jank for a test rig.
-- Scripted scenarios: edit the `.dev` file live to simulate going on-battery,
-  draining, node vanishing (stop container) → verify controller alerting.
+- [x] Build and publish an agent container image (multi-arch like the
+      controller image) so simulation and evaluation do not require a Pi image
+- [x] Add agent simulation mode: `--simulate <dir>` bypasses nut-scanner and
+      udev/netlink, treats each `*.dev` file as a detected UPS, and watches the
+      directory with `fsnotify` so fixture drops/edits simulate hotplug
+- [x] Add deterministic agent demo mode behavior for evaluation workflows,
+      driven by scenario-script state changes rather than autonomous randomness
+- [x] Add sample fixtures under `sim/dummy-ups/` modeled on APC Back-UPS
+      BE1050G3 devices
+- [x] Build `sim/docker-compose.yml` as a configurable sandbox with:
+      - default two agent replicas
+      - one controller
+      - one Mosquitto broker
+      - optional Home Assistant service via Compose profile
+- [x] Document Docker/mDNS caveats (host networking or reflector sidecar may
+      be required on some hosts)
+- [x] Add scripted scenarios in `sim/scenarios/` for on-battery, restore, and
+      node-loss simulation cases
+- [x] Extend the `wk` CLI with `sim up`, `sim down`, and
+      `scenario on_battery` plus replica override support
+- [x] Add CI smoke coverage that boots the sandbox, asserts two pending nodes,
+      adopts them, runs a scenario, and verifies metrics/MQTT flow
 
 ## Deliberately out of scope (for now)
 
