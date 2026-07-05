@@ -19,6 +19,8 @@ export type NodeRecord = {
   display_name: string;
   location_label: string;
   site_label: string;
+  local_ui_policy_managed: boolean;
+  local_ui_policy_enabled: boolean;
   adopted: boolean;
   live: boolean;
   status: string;
@@ -48,6 +50,15 @@ export type UPSDetailResponse = {
   driver: string;
   status?: string;
   metrics?: UPSummary;
+  battery_runtime_trend?: {
+    baseline_runtime_seconds: number;
+    latest_runtime_seconds: number;
+    replacement_threshold_seconds: number;
+    trend_seconds_per_30d: number;
+    samples_used: number;
+    latest_sampled_at: string;
+    estimated_replace_by?: string;
+  };
   variables: Record<string, string>;
   commands?: Array<{ name: string; description?: string; destructive: boolean }>;
   writable?: Array<{ name: string; description?: string; editor: string; current_value?: string }>;
@@ -143,7 +154,16 @@ export function forgetNode(nodeID: string) {
   return requestJSON(`/api/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" });
 }
 
-export function updateNode(nodeID: string, payload: { display_name: string; location_label: string; site_label: string }) {
+export function updateNode(
+  nodeID: string,
+  payload: {
+    display_name?: string;
+    location_label?: string;
+    site_label?: string;
+    local_ui_policy_managed?: boolean;
+    local_ui_policy_enabled?: boolean;
+  },
+) {
   return requestJSON<NodeRecord>(`/api/nodes/${encodeURIComponent(nodeID)}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
