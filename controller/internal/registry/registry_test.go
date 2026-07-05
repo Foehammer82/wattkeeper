@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,6 +98,23 @@ func TestStoreUpsertAndListNodes(t *testing.T) {
 	}
 	if metadataNode.DisplayName != displayName || metadataNode.LocationLabel != locationLabel || metadataNode.SiteLabel != siteLabel {
 		t.Fatalf("metadata node = %#v, want updated controller metadata", metadataNode)
+	}
+	if metadataNode.LocalUIManaged {
+		t.Fatalf("metadata node local UI managed = %t, want false by default", metadataNode.LocalUIManaged)
+	}
+	if !metadataNode.LocalUIEnabled {
+		t.Fatalf("metadata node local UI enabled = %t, want true by default", metadataNode.LocalUIEnabled)
+	}
+
+	if err := store.UpdateNodeLocalUIPolicy(context.Background(), "serial-1234", true, false); err != nil {
+		t.Fatalf("UpdateNodeLocalUIPolicy() error = %v", err)
+	}
+	policyNode, err := store.GetNode(context.Background(), "serial-1234")
+	if err != nil {
+		t.Fatalf("GetNode() after local UI policy update error = %v", err)
+	}
+	if !policyNode.LocalUIManaged || policyNode.LocalUIEnabled {
+		t.Fatalf("policy node = %#v, want managed=true enabled=false", policyNode)
 	}
 
 	adoptedNodes, err := store.ListAdoptedNodes(context.Background())
@@ -293,6 +311,22 @@ func TestStoreUpsertAndListNodes(t *testing.T) {
 	if len(rules) != 0 {
 		t.Fatalf("rules after delete = %#v, want none", rules)
 	}
+	// Alert events must survive deletion of their originating rule: they carry
+	// their own denormalized kind/message, and rule_id is set to NULL (surfaced
+	// here as the zero value) rather than the row being cascade-deleted.
+	eventsAfterDelete, err := store.ListAlertEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAlertEvents() after rule delete error = %v", err)
+	}
+	if len(eventsAfterDelete) != 1 || eventsAfterDelete[0].ID != event.ID {
+		t.Fatalf("events after rule delete = %#v, want the original event retained", eventsAfterDelete)
+	}
+	if eventsAfterDelete[0].RuleID != 0 {
+		t.Fatalf("event.RuleID after rule delete = %d, want 0 (rule_id nulled out)", eventsAfterDelete[0].RuleID)
+	}
+	if eventsAfterDelete[0].Kind != "low_battery" || eventsAfterDelete[0].Message != "battery low" {
+		t.Fatalf("event after rule delete = %#v, want denormalized kind/message preserved", eventsAfterDelete[0])
+	}
 
 	if err := store.DeleteNode(context.Background(), "serial-1234"); err != nil {
 		t.Fatalf("DeleteNode() error = %v", err)
@@ -333,5 +367,103 @@ func TestControllerSettingsRoundTrip(t *testing.T) {
 	}
 	if reloaded != next {
 		t.Fatalf("reloaded settings = %#v, want %#v", reloaded, next)
+	}
+}
+
+// TestMigrateAlertEventsDropCascadeFromLegacySchema seeds a database using the
+// old alert_events schema (rule_id NOT NULL, ON DELETE CASCADE) directly, then
+// opens it through the Store so migrateAlertEventsDropCascade runs, and
+// verifies existing rows are preserved and rule deletion no longer cascades.
+func TestMigrateAlertEventsDropCascadeFromLegacySchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacyDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := legacyDB.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+		t.Fatalf("enable foreign keys error = %v", err)
+	}
+	const legacySchema = `
+CREATE TABLE alert_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  ups_var TEXT NOT NULL DEFAULT '',
+  threshold REAL,
+  webhook_url TEXT NOT NULL,
+  debounce_seconds INTEGER NOT NULL DEFAULT 300,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE alert_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id INTEGER NOT NULL,
+  node_id TEXT NOT NULL,
+  ups_id TEXT NOT NULL DEFAULT '',
+  subject_key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered INTEGER NOT NULL DEFAULT 0,
+  delivery_error TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
+);`
+	if _, err := legacyDB.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy schema error = %v", err)
+	}
+	if _, err := legacyDB.Exec(`INSERT INTO alert_rules (id, kind, webhook_url, created_at) VALUES (1, 'low_battery', 'http://example.invalid/hook', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed legacy alert_rules error = %v", err)
+	}
+	if _, err := legacyDB.Exec(`INSERT INTO alert_events (id, rule_id, node_id, subject_key, kind, message, created_at) VALUES (1, 1, 'node-a', 'node-a:ups-a', 'low_battery', 'battery low', '2026-01-01T00:01:00Z')`); err != nil {
+		t.Fatalf("seed legacy alert_events error = %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy db error = %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() on legacy schema error = %v", err)
+	}
+	defer store.Close()
+
+	events, err := store.ListAlertEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAlertEvents() after migration error = %v", err)
+	}
+	if len(events) != 1 || events[0].ID != 1 || events[0].RuleID != 1 {
+		t.Fatalf("events after migration = %#v, want the original event with rule_id=1 preserved", events)
+	}
+
+	if err := store.DeleteAlertRule(context.Background(), 1); err != nil {
+		t.Fatalf("DeleteAlertRule() after migration error = %v", err)
+	}
+	eventsAfterDelete, err := store.ListAlertEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAlertEvents() after rule delete error = %v", err)
+	}
+	if len(eventsAfterDelete) != 1 || eventsAfterDelete[0].ID != 1 {
+		t.Fatalf("events after rule delete = %#v, want the event retained (no cascade)", eventsAfterDelete)
+	}
+	if eventsAfterDelete[0].RuleID != 0 {
+		t.Fatalf("event.RuleID after rule delete = %d, want 0 (rule_id nulled out, not cascade-deleted)", eventsAfterDelete[0].RuleID)
+	}
+
+	// Re-opening the already-migrated database must be a no-op (idempotent).
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store error = %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open() migrated schema error = %v", err)
+	}
+	defer reopened.Close()
+	eventsAfterReopen, err := reopened.ListAlertEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAlertEvents() after re-open error = %v", err)
+	}
+	if len(eventsAfterReopen) != 1 {
+		t.Fatalf("events after re-open = %#v, want the event still present", eventsAfterReopen)
 	}
 }

@@ -1,6 +1,7 @@
 package ca
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -76,4 +77,26 @@ func (a *Authority) CAPEM() string {
 		return ""
 	}
 	return string(a.certPEM)
+}
+
+func (a *Authority) SignSHA256Digest(digest []byte) ([]byte, error) {
+	if a == nil {
+		return nil, fmt.Errorf("authority unavailable")
+	}
+	if len(digest) != 32 {
+		return nil, fmt.Errorf("digest must be 32 bytes (sha256)")
+	}
+	block, _ := pem.Decode(a.keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("decode CA private key PEM")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CA private key: %w", err)
+	}
+	signature, err := key.Sign(rand.Reader, digest, crypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("sign digest: %w", err)
+	}
+	return signature, nil
 }
