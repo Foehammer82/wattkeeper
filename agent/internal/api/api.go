@@ -2088,14 +2088,13 @@ func (s *Service) issueCSRFToken(w http.ResponseWriter, r *http.Request) (string
 	if err != nil {
 		return "", err
 	}
-	secure := cookieShouldBeSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   secure,
+		Secure:   true,
 		MaxAge:   int(defaultSessionTTL.Seconds()),
 	})
 	return token, nil
