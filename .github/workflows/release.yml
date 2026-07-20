@@ -22,6 +22,10 @@ permissions:
 jobs:
   release-agent:
     runs-on: ubuntu-latest
+    # pi-gen builds a full Raspberry Pi OS Lite image under QEMU arm64 emulation,
+    # which is slow; keep a generous cap so a genuine hang fails loudly instead
+    # of running indefinitely.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -60,6 +64,24 @@ jobs:
           tag_name: ${{ inputs.version || github.ref_name }}
           prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
           generate_release_notes: true
+          # Fail the release step (instead of silently publishing a partial
+          # release) if any declared artifact glob below doesn't match a file,
+          # e.g. the flashable image failed to build.
+          fail_on_unmatched_files: true
+          body: |
+            ## Deployment artifacts
+
+            | Artifact | Description |
+            | --- | --- |
+            | `wattkeeper-node-${{ inputs.version || github.ref_name }}.img.xz` | Flashable Raspberry Pi OS Lite image with the agent pre-installed. Verify against the matching `.sha256` file before flashing. |
+            | `wattkeeper-agent-${{ inputs.version || github.ref_name }}-linux-arm64.tar.gz` | Standalone agent binary + systemd/udev install assets (arm64, e.g. Pi Zero 2 W, Pi 4/5). |
+            | `wattkeeper-agent-${{ inputs.version || github.ref_name }}-linux-armv6.tar.gz` | Standalone agent binary + systemd/udev install assets (armv6 fallback). |
+            | `SHA256SUMS` | Checksums for the two agent archives above. |
+
+            ## Container images
+
+            - `ghcr.io/${{ github.repository_owner }}/wattkeeper-controller:${{ inputs.version || github.ref_name }}`
+            - `ghcr.io/${{ github.repository_owner }}/wattkeeper-agent:${{ inputs.version || github.ref_name }}`
           files: |
             dist/release/*.tar.gz
             dist/release/SHA256SUMS
@@ -68,6 +90,7 @@ jobs:
 
   release-controller-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -133,6 +156,7 @@ jobs:
 
   release-agent-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout

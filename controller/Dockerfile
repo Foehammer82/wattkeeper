@@ -2,6 +2,7 @@ FROM node:22-bookworm-slim AS web-build
 WORKDIR /src/controller/web
 
 COPY controller/web/package.json ./package.json
+COPY controller/web/package-lock.json ./package-lock.json
 COPY controller/web/tsconfig.json ./tsconfig.json
 COPY controller/web/tsconfig.app.json ./tsconfig.app.json
 COPY controller/web/tsconfig.node.json ./tsconfig.node.json
@@ -9,7 +10,7 @@ COPY controller/web/vite.config.ts ./vite.config.ts
 COPY controller/web/index.html ./index.html
 COPY controller/web/src ./src
 
-RUN npm install && npm run build
+RUN npm ci && npm run build
 
 FROM golang:1.26 AS build
 WORKDIR /src
