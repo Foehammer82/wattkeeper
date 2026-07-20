@@ -11,20 +11,29 @@ on:
       - ".github/skills/**"
       - ".github/prompts/**"
 
-concurrency:
-  group: auto-release-main
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
 jobs:
-  compute:
+  tag:
     # Maintainers can add "[skip release]" to a merge/push commit message to
     # land main-only changes (docs, CI tweaks, etc.) without cutting a patch
     # release for the configured major.minor train.
     if: "!contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Serialize only version computation + tag push (a few seconds) across
+    # pushes to main, so two near-simultaneous pushes can't compute and push
+    # the same next version. Deliberately NOT shared with the `release` job
+    # below: image builds there can take a long time, and this job must not
+    # queue behind (or get starved by) a slow in-flight release build, or a
+    # later push's release would never get computed/tagged. Each version's
+    # actual build/publish is serialized independently via release.yml's own
+    # per-version concurrency group instead.
+    concurrency:
+      group: auto-release-version
+      cancel-in-progress: false
     outputs:
       version: ${{ steps.next.outputs.version }}
       prerelease: ${{ steps.next.outputs.prerelease }}
@@ -47,20 +56,9 @@ jobs:
         id: next
         run: uv run wk release next-version --github-output
 
-  tag:
-    needs: compute
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Create and push release tag
         env:
-          VERSION: ${{ needs.compute.outputs.version }}
+          VERSION: ${{ steps.next.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -68,10 +66,10 @@ jobs:
           git push origin "$VERSION"
 
   release:
-    needs: [compute, tag]
+    needs: tag
     permissions:
       contents: write
       packages: write
     uses: ./.github/workflows/release.yml
     with:
-      version: ${{ needs.compute.outputs.version }}
+      version: ${{ needs.tag.outputs.version }}

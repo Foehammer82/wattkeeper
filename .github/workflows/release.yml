@@ -12,7 +12,14 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Key by the actual release version/tag rather than github.ref: when this
+  # workflow is called via workflow_call from auto-release.yml (push to
+  # main), github.ref is refs/heads/main for every version, which would put
+  # every release's build+publish in the same group and let a newer
+  # version's run cancel an older one still in progress (cancel-in-progress
+  # below). Scoping by version means different versions build independently
+  # and only re-runs of the *same* tag cancel each other.
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
