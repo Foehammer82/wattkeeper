@@ -260,34 +260,44 @@ Goal: remove manual tag choreography for normal releases by letting merges to
 `main` drive deterministic build/deploy/release automation, while still
 keeping explicit maintainer control over major/minor version bumps.
 
-- [ ] Create a single source of truth for release train control (for example,
+- [x] Create a single source of truth for release train control (for example,
       `.github/release/version.toml`) that stores the active `major` and
       `minor` values plus RC behavior toggles used by workflows.
-- [ ] Add a validated `wk release next-version` path that computes the next
+- [x] Add a validated `wk release next-version` path that computes the next
       patch from existing tags for the configured major/minor train
       (`vMAJOR.MINOR.PATCH`) and supports prerelease forms
       (`vMAJOR.MINOR.PATCH-rcN`).
-- [ ] Add automation so any merge commit or direct push to `main` runs a
+- [x] Add automation so any merge commit or direct push to `main` runs a
       release orchestration workflow that:
       1. Computes `next_patch` for the configured major/minor train
       2. Creates an immutable annotated release tag
       3. Reuses existing release jobs to publish binaries, node image, and
          controller/agent container images
       4. Emits `latest` tags only for stable releases (never for `-rcN`)
-- [ ] Keep explicit manual control for major/minor changes via a dedicated
+- [x] Keep explicit manual control for major/minor changes via a dedicated
       maintainer-only workflow or PR that edits the central version file,
       with audit trail in git history.
-- [ ] Define RC generation policy for PRs targeting `main` and implement one
+- [x] Define RC generation policy for PRs targeting `main` and implement one
       of these modes:
       1. Always build RC artifacts for every PR to `main`
       2. Build RC artifacts only when a PR has a release-candidate label
       3. Build lightweight RC binaries by default, and gate expensive RC image
          builds behind label or manual workflow dispatch
-- [ ] Add branch protection and workflow permissions so release tags are only
+- [x] Add branch protection and workflow permissions so release tags are only
       created by CI on `main` and cannot be overwritten or force-moved.
-- [ ] Document the new release model in `README.md` and `CONTRIBUTING.md`,
+- [x] Document the new release model in `README.md` and `CONTRIBUTING.md`,
       including examples for major/minor bump operations, RC trigger behavior,
       and rollback/hotfix handling.
+
+**Implementation status**: Phase 5.5 software scope is complete in this repo.
+`.github/release/version.toml` is the release-train source of truth, `wk
+release next-version`/`wk release set-train` are pytest-covered, and
+`.github/workflows/auto-release.yml`, `rc.yml`, and `version-bump.yml` wire the
+automation described above on top of the existing `release.yml` publish jobs
+(now also invocable via `workflow_call`). The remaining branch-protection item
+is enforced via a repository tag ruleset in GitHub settings (documented in
+`CONTRIBUTING.md`), which is an administrative action outside this repo's
+tracked files.
 
 ## Phase 5.6 - Alerting expansion
 

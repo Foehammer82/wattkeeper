@@ -1,0 +1,53 @@
+name: Version Train Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      major:
+        description: "New major version for the active release train"
+        required: true
+        type: number
+      minor:
+        description: "New minor version for the active release train"
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    # Maintainer-only major/minor changes go through a reviewed PR rather than
+    # a direct commit to main, so the change has a normal audit trail and
+    # cannot bypass branch protection on main.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Update release train
+        run: uv run wk release set-train --major ${{ inputs.major }} --minor ${{ inputs.minor }}
+
+      - name: Open version bump pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: "chore: bump release train to ${{ inputs.major }}.${{ inputs.minor }}"
+          branch: release-train/${{ inputs.major }}.${{ inputs.minor }}
+          title: "Bump release train to ${{ inputs.major }}.${{ inputs.minor }}"
+          body: >
+            Updates `.github/release/version.toml` to start computing patch
+            releases from `v${{ inputs.major }}.${{ inputs.minor }}.0`.
+            Triggered manually via the Version Train Bump workflow.
+          add-paths: .github/release/version.toml

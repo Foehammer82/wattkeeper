@@ -69,13 +69,17 @@ For image or release work, validate with the local commands described in [README
 
 ## Release And Maintainer Notes
 
-Release tags are expected to be created by maintainers from a reviewed commit, not from random feature branches.
+Release tags are created by CI, not by hand-pushing tags from a workstation. Do not reuse, retag, or force-move an existing release tag.
 
+- `.github/release/version.toml` holds the active `major`/`minor` release train and RC build toggles. It is the single source of truth consumed by `wk release next-version`.
+- Every push to `main` (except docs-only changes and commits with `[skip release]` in the message) triggers `.github/workflows/auto-release.yml`, which computes the next patch tag for the configured train, pushes an immutable annotated tag, and calls `.github/workflows/release.yml` to build and publish it.
 - Stable releases use `vMAJOR.MINOR.PATCH`, for example `v0.2.0`.
-- Release candidates use `vMAJOR.MINOR.PATCH-rcN`, for example `v0.2.0-rc1`.
-- Other prereleases may use `vMAJOR.MINOR.PATCH-QUALIFIERN`, for example `v0.2.0-beta1`.
-- Any tag containing a hyphen is published by GitHub Actions as a prerelease.
-- Do not reuse, retag, or force-move an existing release tag.
+- Release candidates use `vMAJOR.MINOR.PATCH-rcN`, for example `v0.2.0-rc1`. Other prereleases may use `vMAJOR.MINOR.PATCH-QUALIFIERN`, for example `v0.2.0-beta1`.
+- Any tag containing a hyphen is published by GitHub Actions as a prerelease, and never receives the `latest` container image tag.
+- To bump the major or minor version, run the "Version Train Bump" workflow (`workflow_dispatch` on `.github/workflows/version-bump.yml`) with the new `major`/`minor` inputs. It runs `wk release set-train` and opens a pull request updating `version.toml` so the change has a normal review and audit trail; merge that PR before the next push to `main` picks up the new train.
+- Pull requests targeting `main` automatically get release-candidate agent binaries as workflow artifacts (`.github/workflows/rc.yml`). Add the `release-candidate` label to a PR, or run the workflow manually, to also validate a build of the controller and agent images; those images are never pushed.
+- For an out-of-band hotfix or manual validation, you can still push a tag by hand (`git tag -a v0.2.1 -m "..."` then `git push origin v0.2.1`); `release.yml` triggers directly on any `v*` tag push regardless of how the tag was created.
+- Repository tag protection should restrict creation of `v*` tags to the GitHub Actions bot/CI identity and block force-pushes or deletions of existing release tags; configure this as a tag protection rule or ruleset in the repository settings.
 
 If you are validating release behavior, prefer an `-rcN` tag first, then promote to a stable tag only after the artifacts and smoke checks look correct.
 

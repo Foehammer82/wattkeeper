@@ -104,14 +104,16 @@ If you are starting work from scratch:
 
 ## Releases Today
 
-This repository now produces versioned agent release artifacts, a flashable Raspberry Pi OS Lite image for Wattkeeper nodes, and a published multi-arch controller container image:
+This repository now produces versioned agent release artifacts, a flashable Raspberry Pi OS Lite image for Wattkeeper nodes, and a published multi-arch controller container image. Release tagging is automated for normal merges, while major/minor version choices and prerelease validation stay under maintainer control:
 
-1. Create and push a SemVer-style tag such as `v0.1.0` for a normal release or `v0.1.0-rc1` for a prerelease.
-2. GitHub Actions runs `.github/workflows/release.yml`.
-3. The workflow runs tests, builds the agent for `linux/arm64` and `linux/armv6`, packages each archive with the install assets from `deploy/`, builds the `wattkeeper-node-<version>.img.xz` image through pi-gen, and publishes those artifacts to the GitHub Release for that tag.
-4. The same tag workflow also builds and pushes the multi-arch controller image to `ghcr.io/<owner>/wattkeeper-controller` for `linux/amd64` and `linux/arm64`.
+1. `.github/release/version.toml` is the single source of truth for the active release train (`major`/`minor`) and RC build behavior. Only maintainers change it, via the manual "Version Train Bump" GitHub Actions workflow (`workflow_dispatch`), which opens a reviewed pull request rather than committing directly.
+2. Every push to `main` (other than docs-only changes, or a commit whose message contains `[skip release]`) runs `.github/workflows/auto-release.yml`, which computes the next patch tag for the configured train with `wk release next-version`, creates and pushes an immutable annotated tag such as `v0.1.1`, and calls the existing `.github/workflows/release.yml` to build and publish it. `latest` image tags are only emitted for stable tags, never for `-rcN` prereleases.
+3. Pull requests targeting `main` automatically get lightweight release-candidate agent binaries as workflow artifacts via `.github/workflows/rc.yml`. Attach the `release-candidate` label (or run the workflow manually) to also validate a build of the controller and agent container images; those RC images are never pushed anywhere.
+4. Maintainers can still cut a tag by hand (for example, an out-of-band hotfix) by pushing a SemVer-style tag such as `v0.1.0` or a prerelease like `v0.1.0-rc1`; `release.yml` still triggers directly on any `v*` tag push.
+5. `release.yml` runs tests, builds the agent for `linux/arm64` and `linux/armv6`, packages each archive with the install assets from `deploy/`, builds the `wattkeeper-node-<version>.img.xz` image through pi-gen, publishes those artifacts to the GitHub Release for that tag, and builds/pushes the multi-arch controller and agent container images to `ghcr.io/<owner>/wattkeeper-controller` and `ghcr.io/<owner>/wattkeeper-agent`.
 
 You can build the same release payload locally with:
+
 
 ```sh
 uv run wk release agent --version v0.1.0

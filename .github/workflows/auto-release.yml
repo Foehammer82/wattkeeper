@@ -1,0 +1,77 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "mkdocs.yml"
+      - ".github/skills/**"
+      - ".github/prompts/**"
+
+concurrency:
+  group: auto-release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compute:
+    # Maintainers can add "[skip release]" to a merge/push commit message to
+    # land main-only changes (docs, CI tweaks, etc.) without cutting a patch
+    # release for the configured major.minor train.
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      prerelease: ${{ steps.next.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Compute next release version
+        id: next
+        run: uv run wk release next-version --github-output
+
+  tag:
+    needs: compute
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push release tag
+        env:
+          VERSION: ${{ needs.compute.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+  release:
+    needs: [compute, tag]
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.compute.outputs.version }}
