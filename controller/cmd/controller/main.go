@@ -41,6 +41,8 @@ import (
 
 var version = "dev"
 
+const defaultControllerDataDir = "/data"
+
 type config struct {
 	dataDir             string
 	listen              string
@@ -73,25 +75,27 @@ type app struct {
 }
 
 type nodeResponse struct {
-	ID            string               `json:"id"`
-	Instance      string               `json:"instance"`
-	Hostname      string               `json:"hostname"`
-	Address       string               `json:"address"`
-	Port          int                  `json:"port"`
-	Version       string               `json:"version"`
-	UPSCount      int                  `json:"ups_count"`
-	DisplayName   string               `json:"display_name"`
-	LocationLabel string               `json:"location_label"`
-	SiteLabel     string               `json:"site_label"`
-	Adopted       bool                 `json:"adopted"`
-	Live          bool                 `json:"live"`
-	Status        string               `json:"status"`
-	CommsState    string               `json:"comms_state"`
-	PollFailures  int                  `json:"poll_failures"`
-	LastPolledAt  time.Time            `json:"last_polled_at,omitempty"`
-	LastPollError string               `json:"last_poll_error,omitempty"`
-	UPSSummaries  []upsSummaryResponse `json:"ups_summaries,omitempty"`
-	LastSeen      time.Time            `json:"last_seen"`
+	ID             string               `json:"id"`
+	Instance       string               `json:"instance"`
+	Hostname       string               `json:"hostname"`
+	Address        string               `json:"address"`
+	Port           int                  `json:"port"`
+	Version        string               `json:"version"`
+	UPSCount       int                  `json:"ups_count"`
+	DisplayName    string               `json:"display_name"`
+	LocationLabel  string               `json:"location_label"`
+	SiteLabel      string               `json:"site_label"`
+	LocalUIManaged bool                 `json:"local_ui_policy_managed"`
+	LocalUIEnabled bool                 `json:"local_ui_policy_enabled"`
+	Adopted        bool                 `json:"adopted"`
+	Live           bool                 `json:"live"`
+	Status         string               `json:"status"`
+	CommsState     string               `json:"comms_state"`
+	PollFailures   int                  `json:"poll_failures"`
+	LastPolledAt   time.Time            `json:"last_polled_at,omitempty"`
+	LastPollError  string               `json:"last_poll_error,omitempty"`
+	UPSSummaries   []upsSummaryResponse `json:"ups_summaries,omitempty"`
+	LastSeen       time.Time            `json:"last_seen"`
 }
 
 type upsSummaryResponse struct {
@@ -142,16 +146,27 @@ type nodeUPSListResponse struct {
 }
 
 type nodeUPSDetailResponse struct {
-	NodeID     string                   `json:"node_id"`
-	Name       string                   `json:"name"`
-	Driver     string                   `json:"driver"`
-	Status     string                   `json:"status,omitempty"`
-	Metrics    *upsSummaryResponse      `json:"metrics,omitempty"`
-	Variables  map[string]string        `json:"variables"`
-	Commands   []upsCommandDescriptor   `json:"commands,omitempty"`
-	Writable   []upsWritableVarResponse `json:"writable,omitempty"`
-	Live       bool                     `json:"live"`
-	CapturedAt time.Time                `json:"captured_at,omitempty"`
+	NodeID              string                   `json:"node_id"`
+	Name                string                   `json:"name"`
+	Driver              string                   `json:"driver"`
+	Status              string                   `json:"status,omitempty"`
+	Metrics             *upsSummaryResponse      `json:"metrics,omitempty"`
+	BatteryRuntimeTrend *batteryTrendResponse    `json:"battery_runtime_trend,omitempty"`
+	Variables           map[string]string        `json:"variables"`
+	Commands            []upsCommandDescriptor   `json:"commands,omitempty"`
+	Writable            []upsWritableVarResponse `json:"writable,omitempty"`
+	Live                bool                     `json:"live"`
+	CapturedAt          time.Time                `json:"captured_at,omitempty"`
+}
+
+type batteryTrendResponse struct {
+	BaselineRuntimeSeconds  int64     `json:"baseline_runtime_seconds"`
+	LatestRuntimeSeconds    int64     `json:"latest_runtime_seconds"`
+	ReplacementThresholdSec int64     `json:"replacement_threshold_seconds"`
+	TrendSecondsPer30Days   float64   `json:"trend_seconds_per_30d"`
+	SamplesUsed             int       `json:"samples_used"`
+	LatestSampledAt         time.Time `json:"latest_sampled_at"`
+	EstimatedReplaceBy      time.Time `json:"estimated_replace_by,omitempty"`
 }
 
 type alertRulesResponse struct {
@@ -207,6 +222,11 @@ type nodeUPSCommandRequest struct {
 	Command string `json:"cmd"`
 }
 
+type nodeLocalUIPolicyRequest struct {
+	Managed bool `json:"managed"`
+	Enabled bool `json:"enabled"`
+}
+
 type nodeUPSCommandResponse struct {
 	UPS     string `json:"ups"`
 	Command string `json:"command"`
@@ -231,9 +251,11 @@ type agentUPSCommandResponse struct {
 }
 
 type updateNodeMetadataRequest struct {
-	DisplayName   *string `json:"display_name"`
-	LocationLabel *string `json:"location_label"`
-	SiteLabel     *string `json:"site_label"`
+	DisplayName    *string `json:"display_name"`
+	LocationLabel  *string `json:"location_label"`
+	SiteLabel      *string `json:"site_label"`
+	LocalUIManaged *bool   `json:"local_ui_policy_managed"`
+	LocalUIEnabled *bool   `json:"local_ui_policy_enabled"`
 }
 
 type agentAdoptRequest struct {
@@ -253,6 +275,20 @@ type agentAdoptResponse struct {
 	TokenSHA256    string `json:"token_sha256"`
 }
 
+type agentOTAUpdateRequest struct {
+	Version         string `json:"version"`
+	BinaryBase64    string `json:"binary_base64"`
+	SHA256          string `json:"sha256"`
+	SignatureBase64 string `json:"signature_base64"`
+}
+
+type agentOTAUpdateResponse struct {
+	Status          string `json:"status"`
+	Version         string `json:"version"`
+	SHA256          string `json:"sha256"`
+	RestartRequired bool   `json:"restart_required"`
+}
+
 var (
 	errNodeAlreadyAdopted          = errors.New("node already adopted")
 	errTrustedNodeUnauthorized     = errors.New("node rejected controller credentials")
@@ -270,8 +306,28 @@ var webAssets embed.FS
 var controllerAssetFS = mustSubFS(webAssets, "assets")
 
 func main() {
-	cfg := parseFlags()
 	logger := log.New(os.Stdout, "wattkeeper-controller: ", log.LstdFlags)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "backup":
+			if err := runBackupCommand(logger, os.Args[2:]); err != nil {
+				logger.Fatalf("backup failed: %v", err)
+			}
+			return
+		case "restore":
+			if err := runRestoreCommand(logger, os.Args[2:]); err != nil {
+				logger.Fatalf("restore failed: %v", err)
+			}
+			return
+		case "ota":
+			if err := runOTACommand(logger, os.Args[2:]); err != nil {
+				logger.Fatalf("ota failed: %v", err)
+			}
+			return
+		}
+	}
+
+	cfg := parseFlags()
 	logger.Printf("starting listen=%s data_dir=%s log_level=%s", cfg.listen, cfg.dataDir, cfg.logLevel)
 
 	if err := os.MkdirAll(cfg.dataDir, 0o700); err != nil {
@@ -395,7 +451,7 @@ func main() {
 
 func parseFlags() config {
 	var cfg config
-	flag.StringVar(&cfg.dataDir, "data-dir", "/data", "directory for controller data")
+	flag.StringVar(&cfg.dataDir, "data-dir", defaultControllerDataDir, "directory for controller data")
 	flag.StringVar(&cfg.listen, "listen", ":9000", "controller listen address")
 	flag.StringVar(&cfg.logLevel, "log-level", "info", "log verbosity level")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval", 15*time.Second, "interval between adopted-node NUT polls")
@@ -412,6 +468,272 @@ func parseFlags() config {
 	flag.StringVar(&cfg.aggregateNUTPass, "aggregate-nut-pass", "controller", "password required for aggregate NUT listener")
 	flag.Parse()
 	return cfg
+}
+
+type backupConfig struct {
+	dataDir string
+	output  string
+}
+
+type restoreConfig struct {
+	dataDir string
+	input   string
+	force   bool
+}
+
+type otaConfig struct {
+	dataDir    string
+	nodeID     string
+	binaryPath string
+	version    string
+}
+
+func parseBackupFlags(args []string) (backupConfig, error) {
+	var cfg backupConfig
+	flags := flag.NewFlagSet("wattkeeper-controller backup", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&cfg.dataDir, "data-dir", defaultControllerDataDir, "directory containing controller.db")
+	flags.StringVar(&cfg.output, "output", "", "destination path for backup copy of controller.db")
+	if err := flags.Parse(args); err != nil {
+		return backupConfig{}, err
+	}
+	return cfg, nil
+}
+
+func parseRestoreFlags(args []string) (restoreConfig, error) {
+	var cfg restoreConfig
+	flags := flag.NewFlagSet("wattkeeper-controller restore", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&cfg.dataDir, "data-dir", defaultControllerDataDir, "directory containing controller.db")
+	flags.StringVar(&cfg.input, "input", "", "source backup file to restore into controller.db")
+	flags.BoolVar(&cfg.force, "force", false, "overwrite existing controller.db")
+	if err := flags.Parse(args); err != nil {
+		return restoreConfig{}, err
+	}
+	return cfg, nil
+}
+
+func parseOTAFlags(args []string) (otaConfig, error) {
+	var cfg otaConfig
+	flags := flag.NewFlagSet("wattkeeper-controller ota", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&cfg.dataDir, "data-dir", defaultControllerDataDir, "directory containing controller.db and controller CA")
+	flags.StringVar(&cfg.nodeID, "node-id", "", "adopted node ID to receive the update")
+	flags.StringVar(&cfg.binaryPath, "binary", "", "path to the signed wattkeeper-agent binary payload")
+	flags.StringVar(&cfg.version, "version", "", "version string advertised in OTA metadata")
+	if err := flags.Parse(args); err != nil {
+		return otaConfig{}, err
+	}
+	return cfg, nil
+}
+
+func controllerDBPath(dataDir string) string {
+	return filepath.Join(strings.TrimSpace(dataDir), "controller.db")
+}
+
+func runBackupCommand(logger *log.Logger, args []string) error {
+	cfg, err := parseBackupFlags(args)
+	if err != nil {
+		return err
+	}
+	output := strings.TrimSpace(cfg.output)
+	if output == "" {
+		return errors.New("backup output path is required")
+	}
+	source := controllerDBPath(cfg.dataDir)
+	info, err := os.Stat(source)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("controller database not found: %s", source)
+		}
+		return fmt.Errorf("stat controller database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("controller database is not a regular file: %s", source)
+	}
+	if err := copyFileAtomic(source, output, 0o600); err != nil {
+		return fmt.Errorf("backup controller database: %w", err)
+	}
+	if logger != nil {
+		logger.Printf("backup complete source=%s output=%s", source, output)
+	}
+	return nil
+}
+
+func runRestoreCommand(logger *log.Logger, args []string) error {
+	cfg, err := parseRestoreFlags(args)
+	if err != nil {
+		return err
+	}
+	input := strings.TrimSpace(cfg.input)
+	if input == "" {
+		return errors.New("restore input path is required")
+	}
+	info, err := os.Stat(input)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("restore input not found: %s", input)
+		}
+		return fmt.Errorf("stat restore input: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("restore input is not a regular file: %s", input)
+	}
+	destination := controllerDBPath(cfg.dataDir)
+	if !cfg.force {
+		if _, statErr := os.Stat(destination); statErr == nil {
+			return fmt.Errorf("controller database already exists at %s (use --force to overwrite)", destination)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("stat destination controller database: %w", statErr)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return fmt.Errorf("create controller data dir: %w", err)
+	}
+	if err := copyFileAtomic(input, destination, 0o600); err != nil {
+		return fmt.Errorf("restore controller database: %w", err)
+	}
+	if logger != nil {
+		logger.Printf("restore complete input=%s destination=%s", input, destination)
+	}
+	return nil
+}
+
+func runOTACommand(logger *log.Logger, args []string) error {
+	cfg, err := parseOTAFlags(args)
+	if err != nil {
+		return err
+	}
+	nodeID := strings.TrimSpace(cfg.nodeID)
+	if nodeID == "" {
+		return errors.New("node-id is required")
+	}
+	binaryPath := strings.TrimSpace(cfg.binaryPath)
+	if binaryPath == "" {
+		return errors.New("binary path is required")
+	}
+	versionText := strings.TrimSpace(cfg.version)
+	if versionText == "" {
+		return errors.New("version is required")
+	}
+
+	authority, err := ca.Ensure(cfg.dataDir)
+	if err != nil {
+		return fmt.Errorf("ensure controller CA: %w", err)
+	}
+	vault, err := securestore.Ensure(cfg.dataDir)
+	if err != nil {
+		return fmt.Errorf("ensure secure store: %w", err)
+	}
+	store, err := registry.Open(controllerDBPath(cfg.dataDir))
+	if err != nil {
+		return fmt.Errorf("open registry: %w", err)
+	}
+	defer store.Close()
+
+	application := &app{
+		logger:   logger,
+		registry: store,
+		ca:       authority,
+		vault:    vault,
+	}
+	response, err := application.pushTrustedAgentUpdate(context.Background(), nodeID, binaryPath, versionText)
+	if err != nil {
+		return err
+	}
+	if logger != nil {
+		logger.Printf("ota update pushed node=%s version=%s sha256=%s restart_required=%t", nodeID, response.Version, response.SHA256, response.RestartRequired)
+	}
+	return nil
+}
+
+func (a *app) pushTrustedAgentUpdate(ctx context.Context, nodeID, binaryPath, versionText string) (agentOTAUpdateResponse, error) {
+	info, err := os.Stat(binaryPath)
+	if err != nil {
+		return agentOTAUpdateResponse{}, fmt.Errorf("stat binary payload: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return agentOTAUpdateResponse{}, fmt.Errorf("binary payload is not a regular file: %s", binaryPath)
+	}
+	binaryPayload, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return agentOTAUpdateResponse{}, fmt.Errorf("read binary payload: %w", err)
+	}
+	if len(binaryPayload) == 0 {
+		return agentOTAUpdateResponse{}, fmt.Errorf("binary payload is empty: %s", binaryPath)
+	}
+	digest := sha256.Sum256(binaryPayload)
+	signature, err := a.ca.SignSHA256Digest(digest[:])
+	if err != nil {
+		return agentOTAUpdateResponse{}, fmt.Errorf("sign ota payload digest: %w", err)
+	}
+	request := agentOTAUpdateRequest{
+		Version:         versionText,
+		BinaryBase64:    base64.StdEncoding.EncodeToString(binaryPayload),
+		SHA256:          fmt.Sprintf("%x", digest[:]),
+		SignatureBase64: base64.StdEncoding.EncodeToString(signature),
+	}
+	var response agentOTAUpdateResponse
+	if err := a.doTrustedNodeJSON(ctx, nodeID, http.MethodPost, "/api/agent/update", request, &response); err != nil {
+		return agentOTAUpdateResponse{}, err
+	}
+	return response, nil
+}
+
+func copyFileAtomic(sourcePath, destinationPath string, mode os.FileMode) (err error) {
+	resolvedSource, err := filepath.Abs(strings.TrimSpace(sourcePath))
+	if err != nil {
+		return fmt.Errorf("resolve source path: %w", err)
+	}
+	resolvedDestination, err := filepath.Abs(strings.TrimSpace(destinationPath))
+	if err != nil {
+		return fmt.Errorf("resolve destination path: %w", err)
+	}
+	if resolvedSource == resolvedDestination {
+		return errors.New("source and destination paths must differ")
+	}
+
+	source, err := os.Open(resolvedSource)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destinationDir := filepath.Dir(resolvedDestination)
+	if err := os.MkdirAll(destinationDir, 0o700); err != nil {
+		return fmt.Errorf("ensure destination directory: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp(destinationDir, ".controller-db-*")
+	if err != nil {
+		return fmt.Errorf("create temporary destination file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	if _, err = io.Copy(tempFile, source); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("copy database file: %w", err)
+	}
+	if err = tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("sync database backup: %w", err)
+	}
+	if err = tempFile.Chmod(mode); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("chmod database backup: %w", err)
+	}
+	if err = tempFile.Close(); err != nil {
+		return fmt.Errorf("close temporary destination file: %w", err)
+	}
+	if err = os.Rename(tempPath, resolvedDestination); err != nil {
+		return fmt.Errorf("rename temporary destination file: %w", err)
+	}
+	return nil
 }
 
 func (a *app) routes() http.Handler {
@@ -970,6 +1292,14 @@ func (a *app) handleNodeUPS(w http.ResponseWriter, r *http.Request) {
 				response.Writable = liveDetail.Writable
 			}
 		}
+		trend, trendErr := a.buildBatteryRuntimeTrend(r.Context(), nodeID, upsName)
+		if trendErr != nil {
+			if !errors.Is(trendErr, registry.ErrUPSNotFound) && a.logger != nil {
+				a.logger.Printf("battery trend unavailable node=%s ups=%s: %v", nodeID, upsName, trendErr)
+			}
+		} else {
+			response.BatteryRuntimeTrend = trend
+		}
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
@@ -1118,19 +1448,81 @@ func (a *app) handleUpdateNodeMetadata(w http.ResponseWriter, r *http.Request) {
 		LocationLabel: request.LocationLabel,
 		SiteLabel:     request.SiteLabel,
 	}
-	if patch.DisplayName == nil && patch.LocationLabel == nil && patch.SiteLabel == nil {
+	if patch.DisplayName == nil && patch.LocationLabel == nil && patch.SiteLabel == nil && request.LocalUIManaged == nil && request.LocalUIEnabled == nil {
 		writeJSONError(w, http.StatusBadRequest, "at least one metadata field is required")
 		return
 	}
-	if err := a.registry.UpdateNodeMetadata(r.Context(), id, patch); err != nil {
+	current, err := a.registry.GetNode(r.Context(), id)
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, registry.ErrNodeNotFound) {
 			status = http.StatusNotFound
-		} else if strings.Contains(err.Error(), "empty") {
-			status = http.StatusBadRequest
 		}
 		writeJSONError(w, status, err.Error())
 		return
+	}
+	if patch.DisplayName != nil || patch.LocationLabel != nil || patch.SiteLabel != nil {
+		if err := a.registry.UpdateNodeMetadata(r.Context(), id, patch); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrNodeNotFound) {
+				status = http.StatusNotFound
+			} else if strings.Contains(err.Error(), "empty") {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+	}
+	if request.LocalUIEnabled != nil && request.LocalUIManaged == nil {
+		writeJSONError(w, http.StatusBadRequest, "local_ui_policy_managed is required when updating local_ui_policy_enabled")
+		return
+	}
+	if request.LocalUIManaged != nil {
+		if !current.Adopted {
+			writeJSONError(w, http.StatusBadRequest, "node local UI policy can only be managed after adoption")
+			return
+		}
+		managed := *request.LocalUIManaged
+		enabled := current.LocalUIEnabled
+		if request.LocalUIEnabled != nil {
+			enabled = *request.LocalUIEnabled
+		} else if managed && !current.LocalUIManaged {
+			writeJSONError(w, http.StatusBadRequest, "local_ui_policy_enabled is required when enabling controller-managed policy")
+			return
+		}
+		if err := a.registry.UpdateNodeLocalUIPolicy(r.Context(), id, managed, enabled); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrNodeNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		liveNode, err := a.buildNodeResponse(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrNodeNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		if liveNode.Live {
+			if err := a.applyTrustedNodeLocalUIPolicy(r.Context(), id, managed, enabled); err != nil {
+				_ = a.registry.UpdateNodeLocalUIPolicy(r.Context(), id, current.LocalUIManaged, current.LocalUIEnabled)
+				status := http.StatusBadGateway
+				switch {
+				case errors.Is(err, registry.ErrNodeNotFound):
+					status = http.StatusNotFound
+				case errors.Is(err, errTrustedNodeUnauthorized):
+					status = http.StatusUnauthorized
+				case errors.Is(err, errTrustedNodeFingerprintDrift):
+					status = http.StatusConflict
+				}
+				writeJSONError(w, status, trustedNodeErrorMessage(err))
+				return
+			}
+		}
 	}
 	updated, err := a.buildNodeResponse(r.Context(), id)
 	if err != nil {
@@ -1283,25 +1675,27 @@ func toNodeResponse(node registry.Node, live browse.LiveNode, isLive bool, summa
 		}
 	}
 	return nodeResponse{
-		ID:            node.ID,
-		Instance:      node.Instance,
-		Hostname:      node.Hostname,
-		Address:       node.Address,
-		Port:          node.Port,
-		Version:       node.Version,
-		UPSCount:      node.UPSCount,
-		DisplayName:   node.DisplayName,
-		LocationLabel: node.LocationLabel,
-		SiteLabel:     node.SiteLabel,
-		Adopted:       node.Adopted,
-		Live:          isLive,
-		Status:        status,
-		CommsState:    node.CommsState,
-		PollFailures:  node.PollFailures,
-		LastPolledAt:  node.LastPolledAt,
-		LastPollError: node.LastPollError,
-		UPSSummaries:  toUPSSummaryResponses(summaries),
-		LastSeen:      node.LastSeen,
+		ID:             node.ID,
+		Instance:       node.Instance,
+		Hostname:       node.Hostname,
+		Address:        node.Address,
+		Port:           node.Port,
+		Version:        node.Version,
+		UPSCount:       node.UPSCount,
+		DisplayName:    node.DisplayName,
+		LocationLabel:  node.LocationLabel,
+		SiteLabel:      node.SiteLabel,
+		LocalUIManaged: node.LocalUIManaged,
+		LocalUIEnabled: node.LocalUIEnabled,
+		Adopted:        node.Adopted,
+		Live:           isLive,
+		Status:         status,
+		CommsState:     node.CommsState,
+		PollFailures:   node.PollFailures,
+		LastPolledAt:   node.LastPolledAt,
+		LastPollError:  node.LastPollError,
+		UPSSummaries:   toUPSSummaryResponses(summaries),
+		LastSeen:       node.LastSeen,
 	}
 }
 
@@ -1422,6 +1816,124 @@ func parseFloatVariable(raw string) *float64 {
 	return &parsed
 }
 
+type batteryTrendSnapshot struct {
+	CapturedAt     time.Time
+	RuntimeSeconds *int64
+	ChargePercent  *float64
+	Status         string
+}
+
+type batteryTrendPoint struct {
+	CapturedAt     time.Time
+	RuntimeSeconds int64
+}
+
+func (a *app) buildBatteryRuntimeTrend(ctx context.Context, nodeID, upsName string) (*batteryTrendResponse, error) {
+	history, err := a.registry.ListUPSHistoryFiltered(ctx, nodeID, upsName, "", time.Now().UTC().Add(-45*24*time.Hour), 5000)
+	if err != nil {
+		return nil, err
+	}
+	if len(history) == 0 {
+		return nil, nil
+	}
+
+	snapshotsByUnix := make(map[int64]*batteryTrendSnapshot)
+	for _, sample := range history {
+		unixTS := sample.CapturedAt.UTC().Unix()
+		snapshot, ok := snapshotsByUnix[unixTS]
+		if !ok {
+			snapshot = &batteryTrendSnapshot{CapturedAt: sample.CapturedAt.UTC()}
+			snapshotsByUnix[unixTS] = snapshot
+		}
+		switch strings.TrimSpace(sample.Variable) {
+		case "battery.runtime":
+			parsed, parseErr := strconv.ParseInt(strings.TrimSpace(sample.Value), 10, 64)
+			if parseErr == nil && parsed > 0 {
+				snapshot.RuntimeSeconds = &parsed
+			}
+		case "battery.charge":
+			parsed, parseErr := strconv.ParseFloat(strings.TrimSpace(sample.Value), 64)
+			if parseErr == nil && parsed >= 0 && parsed <= 100 {
+				snapshot.ChargePercent = &parsed
+			}
+		case "ups.status":
+			snapshot.Status = strings.ToUpper(strings.TrimSpace(sample.Value))
+		}
+	}
+
+	points := make([]batteryTrendPoint, 0, len(snapshotsByUnix))
+	for _, snapshot := range snapshotsByUnix {
+		if snapshot.RuntimeSeconds == nil || snapshot.ChargePercent == nil {
+			continue
+		}
+		if *snapshot.ChargePercent < 85 {
+			continue
+		}
+		if strings.Contains(snapshot.Status, "OB") || strings.Contains(snapshot.Status, "DISCHRG") {
+			continue
+		}
+		points = append(points, batteryTrendPoint{CapturedAt: snapshot.CapturedAt, RuntimeSeconds: *snapshot.RuntimeSeconds})
+	}
+	if len(points) < 3 {
+		return nil, nil
+	}
+
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].CapturedAt.Before(points[j].CapturedAt)
+	})
+
+	baseline := points[0].RuntimeSeconds
+	for _, point := range points {
+		if point.RuntimeSeconds > baseline {
+			baseline = point.RuntimeSeconds
+		}
+	}
+	latest := points[len(points)-1]
+
+	var sumX float64
+	var sumY float64
+	var sumXY float64
+	var sumXX float64
+	for _, point := range points {
+		x := point.CapturedAt.Sub(points[0].CapturedAt).Hours() / 24
+		y := float64(point.RuntimeSeconds)
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumXX += x * x
+	}
+	n := float64(len(points))
+	denominator := n*sumXX - sumX*sumX
+	if denominator == 0 {
+		return nil, nil
+	}
+	slopeSecondsPerDay := (n*sumXY - sumX*sumY) / denominator
+	trendSecondsPer30Days := slopeSecondsPerDay * 30
+
+	replaceThreshold := int64(float64(baseline) * 0.70)
+	response := &batteryTrendResponse{
+		BaselineRuntimeSeconds:  baseline,
+		LatestRuntimeSeconds:    latest.RuntimeSeconds,
+		ReplacementThresholdSec: replaceThreshold,
+		TrendSecondsPer30Days:   trendSecondsPer30Days,
+		SamplesUsed:             len(points),
+		LatestSampledAt:         latest.CapturedAt,
+	}
+	if latest.RuntimeSeconds <= replaceThreshold {
+		response.EstimatedReplaceBy = latest.CapturedAt
+		return response, nil
+	}
+	if slopeSecondsPerDay >= -0.01 {
+		return response, nil
+	}
+	daysUntilThreshold := (float64(replaceThreshold) - float64(latest.RuntimeSeconds)) / slopeSecondsPerDay
+	if daysUntilThreshold <= 0 || daysUntilThreshold > 3650 {
+		return response, nil
+	}
+	response.EstimatedReplaceBy = latest.CapturedAt.Add(time.Duration(daysUntilThreshold * 24 * float64(time.Hour)))
+	return response, nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
@@ -1441,6 +1953,10 @@ func (a *app) runTrustedUPSCommand(ctx context.Context, nodeID, upsName, command
 	var response agentUPSCommandResponse
 	err := a.doTrustedNodeJSON(ctx, nodeID, http.MethodPost, "/api/ups/"+url.PathEscape(upsName)+"/command", nodeUPSCommandRequest{Command: command}, &response)
 	return response, err
+}
+
+func (a *app) applyTrustedNodeLocalUIPolicy(ctx context.Context, nodeID string, managed, enabled bool) error {
+	return a.doTrustedNodeJSON(ctx, nodeID, http.MethodPost, "/api/settings/ui/policy", nodeLocalUIPolicyRequest{Managed: managed, Enabled: enabled}, nil)
 }
 
 func (a *app) doTrustedNodeJSON(ctx context.Context, nodeID, method, path string, payload any, out any) error {
@@ -1492,7 +2008,10 @@ func (a *app) doTrustedNodeJSON(ctx context.Context, nodeID, method, path string
 		return fmt.Errorf("%w: unexpected status %d", errTrustedNodeUnauthorized, resp.StatusCode)
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return registry.ErrUPSNotFound
+		if strings.HasPrefix(path, "/api/ups/") {
+			return registry.ErrUPSNotFound
+		}
+		return fmt.Errorf("trusted node request rejected with status %d", resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message := decodeNodeError(resp)

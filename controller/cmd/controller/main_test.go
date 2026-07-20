@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +151,118 @@ func TestAdoptNodeCallsAgentAndMarksRegistryAdopted(t *testing.T) {
 	}
 	if health.NodeID != "serial-1234" || health.Health["status"] != "ok" {
 		t.Fatalf("health = %#v, want trusted node health payload", health)
+	}
+}
+
+func TestPushTrustedAgentUpdateAppliesSignedBinaryOnNode(t *testing.T) {
+	t.Parallel()
+
+	node := newInProcessAgentNode(t)
+	application, _ := newTestAppWithDiscoveredNode(t, node.httpURL(), nil)
+	request := httptest.NewRequest(http.MethodPost, "http://controller.local/api/nodes/serial-1234/adopt", nil)
+	if _, err := application.adoptNode(context.Background(), request, node.nodeResponse()); err != nil {
+		t.Fatalf("adoptNode() error = %v", err)
+	}
+
+	updatePayloadPath := filepath.Join(t.TempDir(), "wattkeeper-agent-update")
+	updateContent := []byte("updated-agent-binary")
+	if err := os.WriteFile(updatePayloadPath, updateContent, 0o755); err != nil {
+		t.Fatalf("write update payload: %v", err)
+	}
+
+	response, err := application.pushTrustedAgentUpdate(context.Background(), "serial-1234", updatePayloadPath, "v0.4.0")
+	if err != nil {
+		t.Fatalf("pushTrustedAgentUpdate() error = %v", err)
+	}
+	if response.Status != "applied" || response.Version != "v0.4.0" || response.SHA256 == "" {
+		t.Fatalf("response = %#v, want applied ota metadata", response)
+	}
+	if !response.RestartRequired {
+		t.Fatalf("response = %#v, want restart_required=true", response)
+	}
+
+	actualContent, err := os.ReadFile(node.agentBinary)
+	if err != nil {
+		t.Fatalf("read node agent binary: %v", err)
+	}
+	if !bytes.Equal(actualContent, updateContent) {
+		t.Fatalf("node agent binary content = %q, want %q", string(actualContent), string(updateContent))
+	}
+}
+
+func TestRunBackupCommandCopiesControllerDB(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	dbPath := controllerDBPath(dataDir)
+	if err := os.WriteFile(dbPath, []byte("sqlite-data"), 0o600); err != nil {
+		t.Fatalf("WriteFile(controller db) error = %v", err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "controller-backup.db")
+
+	err := runBackupCommand(log.New(io.Discard, "", 0), []string{"--data-dir", dataDir, "--output", outputPath})
+	if err != nil {
+		t.Fatalf("runBackupCommand() error = %v", err)
+	}
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(output) error = %v", err)
+	}
+	if string(content) != "sqlite-data" {
+		t.Fatalf("backup content = %q, want sqlite-data", string(content))
+	}
+}
+
+func TestRunBackupCommandRequiresOutputPath(t *testing.T) {
+	t.Parallel()
+
+	err := runBackupCommand(log.New(io.Discard, "", 0), nil)
+	if err == nil || !strings.Contains(err.Error(), "output path") {
+		t.Fatalf("runBackupCommand() error = %v, want missing output path error", err)
+	}
+}
+
+func TestRunRestoreCommandRequiresForceWhenDBExists(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	if err := os.WriteFile(controllerDBPath(dataDir), []byte("existing-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile(existing db) error = %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "controller-backup.db")
+	if err := os.WriteFile(inputPath, []byte("backup-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	err := runRestoreCommand(log.New(io.Discard, "", 0), []string{"--data-dir", dataDir, "--input", inputPath})
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("runRestoreCommand() error = %v, want --force guidance", err)
+	}
+}
+
+func TestRunRestoreCommandOverwritesControllerDBWithForce(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	destination := controllerDBPath(dataDir)
+	if err := os.WriteFile(destination, []byte("old-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile(destination) error = %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "controller-backup.db")
+	if err := os.WriteFile(inputPath, []byte("new-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	err := runRestoreCommand(log.New(io.Discard, "", 0), []string{"--data-dir", dataDir, "--input", inputPath, "--force"})
+	if err != nil {
+		t.Fatalf("runRestoreCommand() error = %v", err)
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("ReadFile(destination) error = %v", err)
+	}
+	if string(content) != "new-db" {
+		t.Fatalf("destination content = %q, want new-db", string(content))
 	}
 }
 
@@ -414,6 +528,271 @@ func TestHandleUpdateNodeMetadataRejectsEmptyPatch(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateNodeMetadataPersistsLocalUIPolicyForAdoptedNode(t *testing.T) {
+	t.Parallel()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_managed":true,"local_ui_policy_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response nodeResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !response.LocalUIManaged || response.LocalUIEnabled {
+		t.Fatalf("response = %#v, want local_ui_policy_managed=true and local_ui_policy_enabled=false", response)
+	}
+}
+
+func TestHandleUpdateNodeMetadataRejectsLocalUIPolicyForPendingNode(t *testing.T) {
+	t.Parallel()
+
+	application, _ := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_managed":true,"local_ui_policy_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestHandleUpdateNodeMetadataRejectsLocalUIEnabledWithoutManaged(t *testing.T) {
+	t.Parallel()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestHandleUpdateNodeMetadataPushesLocalUIPolicyToLiveAdoptedNode(t *testing.T) {
+	t.Parallel()
+
+	policyRequests := 0
+	tlsAgent := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer expected-token" {
+			writeJSONError(w, http.StatusUnauthorized, "invalid bearer token")
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/settings/ui/policy" {
+			t.Fatalf("unexpected trusted policy request %s %s", r.Method, r.URL.Path)
+		}
+		var request nodeLocalUIPolicyRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode local UI policy request: %v", err)
+		}
+		if !request.Managed || request.Enabled {
+			t.Fatalf("policy request = %#v, want managed=true enabled=false", request)
+		}
+		policyRequests++
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "updated"})
+	}))
+	defer tlsAgent.Close()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	hostPort := strings.TrimPrefix(tlsAgent.URL, "https://")
+	host, _, _ := strings.Cut(hostPort, ":")
+	if err := store.UpsertDiscoveredNode(context.Background(), registry.Node{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertDiscoveredNode() refresh error = %v", err)
+	}
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	if err := saveTestTrust(t, application, store, tlsAgent, "expected-token"); err != nil {
+		t.Fatalf("saveTestTrust() error = %v", err)
+	}
+	setBrowserSnapshot(t, application.browser, browse.LiveNode{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		Adopted:  true,
+		LastSeen: time.Now().UTC(),
+	})
+
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_managed":true,"local_ui_policy_enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if policyRequests != 1 {
+		t.Fatalf("policy requests = %d, want 1", policyRequests)
+	}
+}
+
+func TestHandleUpdateNodeMetadataPushesLocalUIPolicyReleaseToLiveAdoptedNode(t *testing.T) {
+	t.Parallel()
+
+	policyRequests := 0
+	tlsAgent := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer expected-token" {
+			writeJSONError(w, http.StatusUnauthorized, "invalid bearer token")
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/settings/ui/policy" {
+			t.Fatalf("unexpected trusted policy request %s %s", r.Method, r.URL.Path)
+		}
+		var request nodeLocalUIPolicyRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode local UI policy request: %v", err)
+		}
+		if request.Managed || !request.Enabled {
+			t.Fatalf("policy request = %#v, want managed=false enabled=true", request)
+		}
+		policyRequests++
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "updated"})
+	}))
+	defer tlsAgent.Close()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	hostPort := strings.TrimPrefix(tlsAgent.URL, "https://")
+	host, _, _ := strings.Cut(hostPort, ":")
+	if err := store.UpsertDiscoveredNode(context.Background(), registry.Node{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertDiscoveredNode() refresh error = %v", err)
+	}
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	if err := store.UpdateNodeLocalUIPolicy(context.Background(), "serial-1234", true, true); err != nil {
+		t.Fatalf("UpdateNodeLocalUIPolicy() seed error = %v", err)
+	}
+	if err := saveTestTrust(t, application, store, tlsAgent, "expected-token"); err != nil {
+		t.Fatalf("saveTestTrust() error = %v", err)
+	}
+	setBrowserSnapshot(t, application.browser, browse.LiveNode{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		Adopted:  true,
+		LastSeen: time.Now().UTC(),
+	})
+
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_managed":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if policyRequests != 1 {
+		t.Fatalf("policy requests = %d, want 1", policyRequests)
+	}
+}
+
+func TestHandleUpdateNodeMetadataRollsBackLocalUIPolicyWhenTrustedPushFails(t *testing.T) {
+	t.Parallel()
+
+	tlsAgent := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONError(w, http.StatusUnauthorized, "invalid bearer token")
+	}))
+	defer tlsAgent.Close()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	hostPort := strings.TrimPrefix(tlsAgent.URL, "https://")
+	host, _, _ := strings.Cut(hostPort, ":")
+	if err := store.UpsertDiscoveredNode(context.Background(), registry.Node{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertDiscoveredNode() refresh error = %v", err)
+	}
+	if err := store.SetNodeAdopted(context.Background(), "serial-1234", true); err != nil {
+		t.Fatalf("SetNodeAdopted() error = %v", err)
+	}
+	if err := store.UpdateNodeLocalUIPolicy(context.Background(), "serial-1234", true, true); err != nil {
+		t.Fatalf("UpdateNodeLocalUIPolicy() seed error = %v", err)
+	}
+	if err := saveTestTrust(t, application, store, tlsAgent, "expected-token"); err != nil {
+		t.Fatalf("saveTestTrust() error = %v", err)
+	}
+	setBrowserSnapshot(t, application.browser, browse.LiveNode{
+		ID:       "serial-1234",
+		Instance: "wkeeper-node-1234",
+		Hostname: "wkeeper-node-1234.local",
+		Address:  host,
+		Port:     80,
+		Version:  "v0.3.0",
+		UPSCount: 1,
+		Adopted:  true,
+		LastSeen: time.Now().UTC(),
+	})
+
+	req := httptest.NewRequest(http.MethodPatch, "http://controller.local/api/nodes/serial-1234", strings.NewReader(`{"local_ui_policy_managed":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	application.handleUpdateNodeMetadata(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	}
+	node, err := store.GetNode(context.Background(), "serial-1234")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if !node.LocalUIManaged || !node.LocalUIEnabled {
+		t.Fatalf("node policy = managed:%t enabled:%t, want rollback to managed=true enabled=true", node.LocalUIManaged, node.LocalUIEnabled)
+	}
+}
+
 func TestBuildNodeResponsesSyncsLiveDiscoveryIntoRegistry(t *testing.T) {
 	t.Parallel()
 
@@ -580,7 +959,7 @@ func TestHandleNodeUPSReturnsDetailAndHistory(t *testing.T) {
 	t.Parallel()
 
 	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
-	firstAt := time.Date(2026, 7, 3, 17, 0, 0, 0, time.UTC)
+	firstAt := time.Now().UTC().Add(-3 * time.Hour)
 	secondAt := firstAt.Add(5 * time.Minute)
 	if err := store.RecordUPSSnapshots(context.Background(), "serial-1234", firstAt, []registry.UPSSnapshot{{Name: "ups-a", Driver: "usbhid-ups", Variables: map[string]string{"battery.charge": "100", "ups.status": "OL"}}}); err != nil {
 		t.Fatalf("RecordUPSSnapshots() first error = %v", err)
@@ -640,6 +1019,66 @@ func TestHandleNodeUPSReturnsDetailAndHistory(t *testing.T) {
 	}
 	if len(filtered.Samples) != 1 || filtered.Samples[0].Variable != "battery.runtime" || filtered.Samples[0].Value != "1500" {
 		t.Fatalf("filtered history = %#v, want only recent battery.runtime sample", filtered)
+	}
+}
+
+func TestHandleNodeUPSDetailIncludesBatteryRuntimeTrend(t *testing.T) {
+	t.Parallel()
+
+	application, store := newTestAppWithDiscoveredNode(t, "http://127.0.0.1:1", nil)
+	base := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	samples := []struct {
+		offsetDays int
+		runtime    string
+	}{
+		{offsetDays: 0, runtime: "2400"},
+		{offsetDays: 1, runtime: "2200"},
+		{offsetDays: 2, runtime: "2000"},
+		{offsetDays: 3, runtime: "1800"},
+		{offsetDays: 4, runtime: "1600"},
+	}
+	for _, sample := range samples {
+		capturedAt := base.Add(time.Duration(sample.offsetDays) * 24 * time.Hour)
+		if err := store.RecordUPSSnapshots(context.Background(), "serial-1234", capturedAt, []registry.UPSSnapshot{{
+			Name:   "ups-a",
+			Driver: "usbhid-ups",
+			Variables: map[string]string{
+				"battery.charge":  "95",
+				"battery.runtime": sample.runtime,
+				"ups.status":      "OL",
+			},
+		}}); err != nil {
+			t.Fatalf("RecordUPSSnapshots() error = %v", err)
+		}
+	}
+
+	detailReq := httptest.NewRequest(http.MethodGet, "http://controller.local/api/nodes/serial-1234/ups/ups-a", nil)
+	detailRecorder := httptest.NewRecorder()
+	application.handleNodeUPS(detailRecorder, detailReq)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d body=%s", detailRecorder.Code, http.StatusOK, detailRecorder.Body.String())
+	}
+	var detail nodeUPSDetailResponse
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("Unmarshal(detail) error = %v", err)
+	}
+	if detail.BatteryRuntimeTrend == nil {
+		t.Fatalf("detail = %#v, want battery runtime trend", detail)
+	}
+	if detail.BatteryRuntimeTrend.BaselineRuntimeSeconds != 2400 {
+		t.Fatalf("baseline runtime = %d, want 2400", detail.BatteryRuntimeTrend.BaselineRuntimeSeconds)
+	}
+	if detail.BatteryRuntimeTrend.LatestRuntimeSeconds != 1600 {
+		t.Fatalf("latest runtime = %d, want 1600", detail.BatteryRuntimeTrend.LatestRuntimeSeconds)
+	}
+	if detail.BatteryRuntimeTrend.SamplesUsed < 5 {
+		t.Fatalf("samples used = %d, want at least 5", detail.BatteryRuntimeTrend.SamplesUsed)
+	}
+	if detail.BatteryRuntimeTrend.TrendSecondsPer30Days >= 0 {
+		t.Fatalf("trend seconds/30d = %f, want negative", detail.BatteryRuntimeTrend.TrendSecondsPer30Days)
+	}
+	if detail.BatteryRuntimeTrend.EstimatedReplaceBy.IsZero() {
+		t.Fatalf("expected estimated replace-by timestamp in trend response")
 	}
 }
 
@@ -1086,7 +1525,6 @@ func TestAdoptionHandshakeAgainstInProcessAgent(t *testing.T) {
 		if _, err := application.adoptNode(context.Background(), httptest.NewRequest(http.MethodPost, "http://controller.local/api/nodes/serial-1234/adopt", nil), node.nodeResponse()); err != nil {
 			t.Fatalf("adoptNode() error = %v", err)
 		}
-		node.bootstrapLocalAuth(t)
 
 		trust, err := store.LoadNodeTrust(context.Background(), "serial-1234")
 		if err != nil {
@@ -1243,6 +1681,7 @@ type inProcessAgentNode struct {
 	tlsPort      int
 	configDir    string
 	adoptionPath string
+	agentBinary  string
 	httpServer   *http.Server
 	tlsServer    *http.Server
 	reloader     *noopReloader
@@ -1289,6 +1728,10 @@ func newInProcessAgentNode(t *testing.T) *inProcessAgentNode {
 	reloader := &noopReloader{}
 	adopted := &adoptedRecorder{}
 	adoptionPath := filepath.Join(tempDir, "adoption.json")
+	agentBinaryPath := filepath.Join(tempDir, "wattkeeper-agent")
+	if err := os.WriteFile(agentBinaryPath, []byte("original-agent-binary"), 0o755); err != nil {
+		t.Fatalf("write test agent binary: %v", err)
+	}
 	tlsCertPath := filepath.Join(tempDir, "node-api.crt")
 	tlsKeyPath := filepath.Join(tempDir, "node-api.key")
 	adopter := &nodeapi.RuntimeAdopter{
@@ -1309,6 +1752,7 @@ func newInProcessAgentNode(t *testing.T) *inProcessAgentNode {
 		RootPath:     tempDir,
 		AdoptionPath: adoptionPath,
 		AuthPath:     filepath.Join(tempDir, "webui-auth.json"),
+		AgentBinary:  agentBinaryPath,
 		Adopter:      adopter,
 	})
 	httpServer := &http.Server{Handler: service.Handler()}
@@ -1327,6 +1771,7 @@ func newInProcessAgentNode(t *testing.T) *inProcessAgentNode {
 		tlsPort:      tlsPort,
 		configDir:    configDir,
 		adoptionPath: adoptionPath,
+		agentBinary:  agentBinaryPath,
 		httpServer:   httpServer,
 		tlsServer:    tlsServer,
 		reloader:     reloader,
@@ -1340,28 +1785,4 @@ func (n *inProcessAgentNode) httpURL() string {
 
 func (n *inProcessAgentNode) nodeResponse() nodeResponse {
 	return nodeResponse{ID: "serial-1234", Address: n.host, Port: n.httpPort, Live: true}
-}
-
-func (n *inProcessAgentNode) bootstrapLocalAuth(t *testing.T) {
-	t.Helper()
-	body, err := json.Marshal(map[string]string{"username": "admin", "password": "secret-pass", "confirm_password": "secret-pass"})
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, n.httpURL()+"/auth/bootstrap", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		t.Fatalf("bootstrap request error = %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		payload := new(bytes.Buffer)
-		_, _ = payload.ReadFrom(resp.Body)
-		t.Fatalf("bootstrap status = %d, want %d body=%s", resp.StatusCode, http.StatusCreated, payload.String())
-	}
 }

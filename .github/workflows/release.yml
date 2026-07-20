@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      version:
+        description: "Release tag to build and publish (e.g. v0.1.1 or v0.1.1-rc1)"
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -45,13 +51,14 @@ jobs:
 
       - name: Build release artifacts
         run: |
-          uv run wk release agent --version ${{ github.ref_name }}
-          uv run wk image node --version ${{ github.ref_name }}
+          uv run wk release agent --version ${{ inputs.version || github.ref_name }}
+          uv run wk image node --version ${{ inputs.version || github.ref_name }}
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          tag_name: ${{ inputs.version || github.ref_name }}
+          prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
           generate_release_notes: true
           files: |
             dist/release/*.tar.gz
@@ -106,8 +113,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/wattkeeper-controller
           tags: |
-            type=raw,value=${{ github.ref_name }}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=${{ inputs.version || github.ref_name }}
+            type=raw,value=latest,enable=${{ !contains(inputs.version || github.ref_name, '-') }}
 
       - name: Build and push controller image
         uses: docker/build-push-action@v6
@@ -117,7 +124,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ inputs.version || github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -149,8 +156,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/wattkeeper-agent
           tags: |
-            type=raw,value=${{ github.ref_name }}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=${{ inputs.version || github.ref_name }}
+            type=raw,value=latest,enable=${{ !contains(inputs.version || github.ref_name, '-') }}
 
       - name: Build and push agent image
         uses: docker/build-push-action@v6
@@ -160,6 +167,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ inputs.version || github.ref_name }}
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}

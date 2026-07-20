@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   display_name TEXT NOT NULL DEFAULT '',
   location_label TEXT NOT NULL DEFAULT '',
   site_label TEXT NOT NULL DEFAULT '',
+  local_ui_policy_managed INTEGER NOT NULL DEFAULT 0,
+  local_ui_policy_enabled INTEGER NOT NULL DEFAULT 1,
   adopted INTEGER NOT NULL DEFAULT 0,
   adopted_at TEXT NOT NULL DEFAULT '',
   controller_url TEXT NOT NULL DEFAULT '',
@@ -54,7 +56,7 @@ CREATE TABLE IF NOT EXISTS alert_rules (
 
 CREATE TABLE IF NOT EXISTS alert_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  rule_id INTEGER NOT NULL,
+  rule_id INTEGER,
   node_id TEXT NOT NULL,
   ups_id TEXT NOT NULL DEFAULT '',
   subject_key TEXT NOT NULL,
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS alert_events (
   created_at TEXT NOT NULL,
   delivered INTEGER NOT NULL DEFAULT 0,
   delivery_error TEXT NOT NULL DEFAULT '',
-  FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
+  FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS controller_settings (

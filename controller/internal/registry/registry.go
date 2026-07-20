@@ -30,23 +30,25 @@ const (
 )
 
 type Node struct {
-	ID            string    `json:"id"`
-	Instance      string    `json:"instance"`
-	Hostname      string    `json:"hostname"`
-	Address       string    `json:"address"`
-	Port          int       `json:"port"`
-	Version       string    `json:"version"`
-	UPSCount      int       `json:"ups_count"`
-	DisplayName   string    `json:"display_name"`
-	LocationLabel string    `json:"location_label"`
-	SiteLabel     string    `json:"site_label"`
-	Adopted       bool      `json:"adopted"`
-	AdoptedAt     time.Time `json:"adopted_at"`
-	CommsState    string    `json:"comms_state"`
-	PollFailures  int       `json:"poll_failures"`
-	LastPolledAt  time.Time `json:"last_polled_at"`
-	LastPollError string    `json:"last_poll_error"`
-	LastSeen      time.Time `json:"last_seen"`
+	ID             string    `json:"id"`
+	Instance       string    `json:"instance"`
+	Hostname       string    `json:"hostname"`
+	Address        string    `json:"address"`
+	Port           int       `json:"port"`
+	Version        string    `json:"version"`
+	UPSCount       int       `json:"ups_count"`
+	DisplayName    string    `json:"display_name"`
+	LocationLabel  string    `json:"location_label"`
+	SiteLabel      string    `json:"site_label"`
+	LocalUIManaged bool      `json:"local_ui_policy_managed"`
+	LocalUIEnabled bool      `json:"local_ui_policy_enabled"`
+	Adopted        bool      `json:"adopted"`
+	AdoptedAt      time.Time `json:"adopted_at"`
+	CommsState     string    `json:"comms_state"`
+	PollFailures   int       `json:"poll_failures"`
+	LastPolledAt   time.Time `json:"last_polled_at"`
+	LastPollError  string    `json:"last_poll_error"`
+	LastSeen       time.Time `json:"last_seen"`
 }
 
 type NodeMetadataPatch struct {
@@ -173,6 +175,8 @@ func applySchema(db *sql.DB) error {
 		`ALTER TABLE nodes ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN location_label TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN site_label TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN local_ui_policy_managed INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN local_ui_policy_enabled INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE nodes ADD COLUMN controller_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN tls_port INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE nodes ADD COLUMN tls_fingerprint TEXT NOT NULL DEFAULT ''`,
@@ -188,7 +192,66 @@ func applySchema(db *sql.DB) error {
 			return fmt.Errorf("apply node schema migration: %w", err)
 		}
 	}
+	if err := migrateAlertEventsDropCascade(db); err != nil {
+		return fmt.Errorf("apply alert_events schema migration: %w", err)
+	}
 	return nil
+}
+
+// migrateAlertEventsDropCascade removes the ON DELETE CASCADE foreign key from
+// alert_events.rule_id (replacing it with ON DELETE SET NULL) so that deleting
+// an alert rule no longer deletes its historical events. alert_events already
+// denormalizes kind/message/node_id/etc, so events remain fully meaningful once
+// their originating rule is gone. SQLite has no ALTER TABLE support for
+// dropping/altering a foreign key, so this recreates the table and copies the
+// existing rows across. It is idempotent: it only runs while the live table
+// definition still has the CASCADE constraint (fresh databases already get the
+// SET NULL definition straight from schema.sql and are left untouched).
+func migrateAlertEventsDropCascade(db *sql.DB) error {
+	var tableSQL sql.NullString
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'alert_events'`).Scan(&tableSQL)
+	if errors.Is(err, sql.ErrNoRows) || !tableSQL.Valid {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read alert_events table definition: %w", err)
+	}
+	if !strings.Contains(tableSQL.String, "ON DELETE CASCADE") {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin alert_events migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	statements := []string{
+		`ALTER TABLE alert_events RENAME TO alert_events_old`,
+		`CREATE TABLE alert_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			rule_id INTEGER,
+			node_id TEXT NOT NULL,
+			ups_id TEXT NOT NULL DEFAULT '',
+			subject_key TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			message TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			delivered INTEGER NOT NULL DEFAULT 0,
+			delivery_error TEXT NOT NULL DEFAULT '',
+			FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE SET NULL
+		)`,
+		`INSERT INTO alert_events (id, rule_id, node_id, ups_id, subject_key, kind, message, created_at, delivered, delivery_error)
+			SELECT id, rule_id, node_id, ups_id, subject_key, kind, message, created_at, delivered, delivery_error FROM alert_events_old`,
+		`DROP TABLE alert_events_old`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_events_rule_subject_time ON alert_events(rule_id, subject_key, created_at)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate alert_events: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error {
@@ -225,7 +288,7 @@ func (s *Store) UpsertDiscoveredNode(ctx context.Context, node Node) error {
 
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
+		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, local_ui_policy_managed, local_ui_policy_enabled, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
 		FROM nodes
 		ORDER BY adopted DESC, last_seen DESC, id ASC
 	`)
@@ -250,7 +313,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 
 func (s *Store) ListAdoptedNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
+		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, local_ui_policy_managed, local_ui_policy_enabled, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
 		FROM nodes
 		WHERE adopted = 1
 		ORDER BY id ASC
@@ -276,7 +339,7 @@ func (s *Store) ListAdoptedNodes(ctx context.Context) ([]Node, error) {
 
 func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
+		SELECT id, instance, hostname, address, port, version, ups_count, display_name, location_label, site_label, local_ui_policy_managed, local_ui_policy_enabled, adopted, adopted_at, comms_state, poll_failures, last_polled_at, last_poll_error, last_seen
 		FROM nodes
 		WHERE id = ?
 	`, id)
@@ -392,6 +455,21 @@ func (s *Store) UpdateNodeMetadata(ctx context.Context, id string, patch NodeMet
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read metadata update count: %w", err)
+	}
+	if rows == 0 {
+		return ErrNodeNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateNodeLocalUIPolicy(ctx context.Context, id string, managed, enabled bool) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET local_ui_policy_managed = ?, local_ui_policy_enabled = ? WHERE id = ?`, boolToInt(managed), boolToInt(enabled), id)
+	if err != nil {
+		return fmt.Errorf("update node local UI policy %s: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read local UI policy update count: %w", err)
 	}
 	if rows == 0 {
 		return ErrNodeNotFound
@@ -967,11 +1045,13 @@ type scanner interface {
 
 func scanNode(row scanner) (Node, error) {
 	var node Node
+	var localUIManaged int
+	var localUIEnabled int
 	var adopted int
 	var adoptedAt string
 	var lastPolledAt string
 	var lastSeen string
-	if err := row.Scan(&node.ID, &node.Instance, &node.Hostname, &node.Address, &node.Port, &node.Version, &node.UPSCount, &node.DisplayName, &node.LocationLabel, &node.SiteLabel, &adopted, &adoptedAt, &node.CommsState, &node.PollFailures, &lastPolledAt, &node.LastPollError, &lastSeen); err != nil {
+	if err := row.Scan(&node.ID, &node.Instance, &node.Hostname, &node.Address, &node.Port, &node.Version, &node.UPSCount, &node.DisplayName, &node.LocationLabel, &node.SiteLabel, &localUIManaged, &localUIEnabled, &adopted, &adoptedAt, &node.CommsState, &node.PollFailures, &lastPolledAt, &node.LastPollError, &lastSeen); err != nil {
 		return Node{}, err
 	}
 	if adoptedAt != "" {
@@ -993,6 +1073,8 @@ func scanNode(row scanner) (Node, error) {
 		return Node{}, fmt.Errorf("parse node last_seen: %w", err)
 	}
 	node.Adopted = adopted == 1
+	node.LocalUIManaged = localUIManaged == 1
+	node.LocalUIEnabled = localUIEnabled == 1
 	if strings.TrimSpace(node.CommsState) == "" {
 		node.CommsState = CommsStateUnknown
 	}
@@ -1069,10 +1151,18 @@ func scanAlertRule(row scanner) (AlertRule, error) {
 
 func scanAlertEvent(row scanner) (AlertEvent, error) {
 	var event AlertEvent
+	var ruleID sql.NullInt64
 	var delivered int
 	var createdAt string
-	if err := row.Scan(&event.ID, &event.RuleID, &event.NodeID, &event.UPSID, &event.SubjectKey, &event.Kind, &event.Message, &createdAt, &delivered, &event.DeliveryError); err != nil {
+	if err := row.Scan(&event.ID, &ruleID, &event.NodeID, &event.UPSID, &event.SubjectKey, &event.Kind, &event.Message, &createdAt, &delivered, &event.DeliveryError); err != nil {
 		return AlertEvent{}, err
+	}
+	// rule_id is nullable: it is set to NULL when the originating alert rule has
+	// since been deleted (see migrateAlertEventsDropCascade). The event itself
+	// keeps its denormalized kind/message/node_id/etc, so it remains meaningful
+	// without a live rule to point to; 0 signals "rule no longer exists".
+	if ruleID.Valid {
+		event.RuleID = ruleID.Int64
 	}
 	parsedCreatedAt, err := time.Parse(time.RFC3339, createdAt)
 	if err != nil {

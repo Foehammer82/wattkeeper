@@ -21,6 +21,7 @@ docs = [
 ]
 dev = [
   "pre-commit>=4,<5",
+  "pytest>=8,<9",
 ]
 
 [tool.uv]
@@ -28,3 +29,6 @@ package = true
 
 [tool.setuptools.packages.find]
 include = ["tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tools/tests"]

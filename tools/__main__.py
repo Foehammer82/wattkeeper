@@ -10,11 +10,14 @@ from pathlib import Path
 
 import typer
 
+from tools.versioning import compute_next_version, load_train, set_train
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = ROOT / "dist"
 RELEASE_DIR = DIST_DIR / "release"
 SIM_COMPOSE = ROOT / "sim" / "docker-compose.yml"
 SIM_SCENARIOS = ROOT / "sim" / "scenarios"
+VERSION_TOML = ROOT / ".github" / "release" / "version.toml"
 UV = os.environ.get("UV", "uv")
 
 AGENT_BIN = "wattkeeper-agent"
@@ -185,6 +188,26 @@ def build_image(version: str, continue_build: bool) -> None:
     run_command(["./image/build.sh", version], env=env)
 
 
+def list_git_tags() -> list[str]:
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def next_release_version(rc: bool) -> str:
+    train = load_train(VERSION_TOML)
+    tags = list_git_tags()
+    version = compute_next_version(train.major, train.minor, tags, rc=rc)
+    if version in tags:
+        raise RuntimeError(f"computed release tag {version} already exists")
+    return version
+
+
 def sim_up(replicas: int, version: str, include_ha: bool) -> None:
     args = compose_args()
     if include_ha:
@@ -317,6 +340,13 @@ def check_lint() -> None:
     run_command(["golangci-lint", "run", "./..."], cwd=ROOT / "controller")
 
 
+@check_app.command("tools")
+def check_tools() -> None:
+    """Run pytest for repo tooling (tools/)."""
+    sync_dev()
+    run_command([UV, "run", "pytest", "tools/tests"])
+
+
 @image_app.command("node")
 def image_node(
     version: str = typer.Option(default_factory=default_version, help="Image version tag"),
@@ -426,6 +456,36 @@ def release_agent(
 ) -> None:
     """Build release tarballs and checksums for agent binaries."""
     release_agent_artifacts(version)
+
+
+@release_app.command("next-version")
+def release_next_version_command(
+    rc: bool = typer.Option(False, help="Compute the next release-candidate tag instead of a stable tag"),
+    github_output: bool = typer.Option(
+        False, "--github-output", help="Also append version/prerelease to $GITHUB_OUTPUT"
+    ),
+) -> None:
+    """Compute the next release tag for the configured major.minor train."""
+    version = next_release_version(rc)
+    typer.echo(version)
+    if github_output:
+        output_path = os.environ.get("GITHUB_OUTPUT")
+        if not output_path:
+            raise RuntimeError("--github-output requires GITHUB_OUTPUT to be set")
+        prerelease = "-" in version
+        with open(output_path, "a", encoding="utf-8") as handle:
+            handle.write(f"version={version}\n")
+            handle.write(f"prerelease={'true' if prerelease else 'false'}\n")
+
+
+@release_app.command("set-train")
+def release_set_train_command(
+    major: int = typer.Option(..., help="Major version for the active release train"),
+    minor: int = typer.Option(..., help="Minor version for the active release train"),
+) -> None:
+    """Update the major.minor release train in .github/release/version.toml."""
+    set_train(VERSION_TOML, major, minor)
+    typer.echo(f"release train set to {major}.{minor}")
 
 
 @docs_app.callback(invoke_without_command=True)

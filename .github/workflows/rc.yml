@@ -1,0 +1,106 @@
+name: Release Candidate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: "Build RC controller/agent images for validation (not pushed)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: rc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rc-binaries:
+    # Always build lightweight RC agent binaries for PR validation; this is
+    # the cheap default from the Phase 5.5 RC policy.
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Test
+        run: uv run wk check test
+
+      - name: Compute release-candidate version
+        id: version
+        run: uv run wk release next-version --rc --github-output
+
+      - name: Build release-candidate agent artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: uv run wk release agent --version "$VERSION"
+
+      - name: Upload agent RC artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wattkeeper-agent-${{ steps.version.outputs.version }}
+          path: dist/release/
+          retention-days: 14
+
+  rc-images:
+    # Expensive controller/agent image builds are gated behind the
+    # "release-candidate" PR label or a manual dispatch, per the Phase 5.5 RC
+    # policy. Images are built for validation only and are never pushed.
+    needs: rc-binaries
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'release-candidate')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build controller image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            VERSION=${{ needs.rc-binaries.outputs.version }}
+
+      - name: Build agent image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent/Dockerfile
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            VERSION=${{ needs.rc-binaries.outputs.version }}
