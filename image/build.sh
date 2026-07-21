@@ -161,6 +161,7 @@ mkdir -p "$WORKSPACE_DIR"
 mkdir -p "$BIN_DIR"
 cp "$SCRIPT_DIR/config" "$WORKSPACE_DIR/config"
 cp -R "$SCRIPT_DIR/stage-strom" "$STAGE_DIR"
+cp "$STAGE_DIR/export-image/prerun.sh" "$PI_GEN_DIR/export-image/prerun.sh"
 
 if [ "$QEMU_HINT" = 'static' ]; then
 	ln -sf "$QEMU_BIN" "$BIN_DIR/qemu-aarch64"
