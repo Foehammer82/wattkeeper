@@ -4,9 +4,6 @@ Strom is a distributed UPS monitoring and management system built around a contr
 
 Small Raspberry Pi nodes run NUT near the hardware, automatically detect USB UPS devices, expose them on the network, serve a per-node web dashboard and status API, and advertise themselves for discovery. A central controller discovers those nodes, adopts them, collects metrics, and eventually bridges the fleet into Home Assistant.
 
-> [!NOTE]
-> Strom was formerly named Wattkeeper. This is a clean-break rename: existing Wattkeeper nodes and controllers must be re-imaged or reinstalled, then re-adopted. Strom uses new binary names, runtime paths, mDNS discovery, and MQTT namespaces.
-
 ## Status
 
 This repository now ships the Phase 1 node agent, the Phase 2 flashable image pipeline, and a substantial Phase 3 controller foundation.
@@ -116,7 +113,6 @@ This repository now produces versioned agent release artifacts, a flashable Rasp
 5. `release.yml` runs tests, builds the agent for `linux/arm64` and `linux/armv6`, packages each archive with the install assets from `deploy/`, builds the `strom-node-<version>.img.xz` image through pi-gen, publishes those artifacts to the GitHub Release for that tag, and builds/pushes the multi-arch controller and agent container images to `ghcr.io/<owner>/strom-controller` and `ghcr.io/<owner>/strom-agent`.
 
 You can build the same release payload locally with:
-
 
 ```sh
 uv run strom release agent --version v0.1.0

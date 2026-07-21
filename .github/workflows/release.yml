@@ -57,6 +57,12 @@ jobs:
         with:
           platforms: arm64
 
+      - name: Install static QEMU emulator for pi-gen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes qemu-user-static
+          command -v qemu-aarch64-static
+
       - name: Test
         run: uv run strom check test
 
