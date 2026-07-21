@@ -18,8 +18,10 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -392,7 +394,40 @@ func TestIndexRendersHTMLDashboard(t *testing.T) {
 		"aria-label=\"Docs (opens in a new tab)\"",
 		"menu-link-icon-wrap",
 		"M14 5h5v5M19 5l-9 9M19 14v5H5V5h5",
+		"ups-metadata-modal",
+		"ups-metadata-form",
+		"ups-metadata-display-name",
+		"ups-metadata-load-description",
+		"ups-metadata-location",
+		"ups-metadata-tags",
+		"Save details",
+		"raw-json-copy",
+		"Copy JSON",
 	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestAuthenticatedIndexRendersCompleteDashboard(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json"), Runner: fakeRunner{outputs: map[string]commandResult{"upsc ups-a": {output: []byte("ups.status: OL\n")}}}})
+	service.UpdateInventory([]nutconf.DetectedUPS{{Name: "ups-a", Driver: "usbhid-ups"}})
+	cookies := loginAsDefaultAdmin(t, service)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookieByName(cookies, sessionCookieName))
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{"action=\"/auth/logout\"", "name=\"csrf_token\"", "ups-metadata-modal", "/assets/app.js", "/assets/about.js"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q: %s", want, body)
 		}
@@ -570,6 +605,45 @@ func TestAPIUPSSetVarExecutesSupportedVariable(t *testing.T) {
 	}
 }
 
+func TestAPIUPSMetadataUpdatePersistsAndReturnsDetail(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	metadataPath := filepath.Join(tempDir, "ups-metadata.json")
+	service := New(nil, Options{RootPath: tempDir, UPSMetadataPath: metadataPath, DisableAuth: true, Runner: fakeRunner{outputs: map[string]commandResult{
+		"upsc -j ups-a":   {output: []byte(`{"ups.status":"OL"}`)},
+		"upscmd -l ups-a": {output: []byte("")},
+		"upsrw -l ups-a":  {output: []byte("")},
+	}}})
+	service.UpdateInventory([]nutconf.DetectedUPS{{Name: "ups-a", Driver: "usbhid-ups"}})
+
+	update := httptest.NewRequest(http.MethodPatch, "/api/ups/ups-a/metadata", strings.NewReader(`{"display_name":"Network UPS","tags":["network","Critical","NETWORK"]}`))
+	update.Header.Set("Content-Type", "application/json")
+	updateRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(updateRecorder, update)
+	if updateRecorder.Code != http.StatusOK {
+		t.Fatalf("metadata update status = %d, want %d body=%s", updateRecorder.Code, http.StatusOK, updateRecorder.Body.String())
+	}
+
+	detail := httptest.NewRequest(http.MethodGet, "/api/ups/ups-a", nil)
+	detailRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(detailRecorder, detail)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d body=%s", detailRecorder.Code, http.StatusOK, detailRecorder.Body.String())
+	}
+	var response upsDetailResponse
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if response.Metadata.DisplayName != "Network UPS" || !reflect.DeepEqual(response.Metadata.Tags, []string{"Critical", "network"}) {
+		t.Fatalf("metadata = %#v", response.Metadata)
+	}
+	loaded, err := loadUPSMetadata(metadataPath)
+	if err != nil || loaded["ups-a"].DisplayName != "Network UPS" {
+		t.Fatalf("persisted metadata = %#v, err=%v", loaded, err)
+	}
+}
+
 func TestAdoptAppliesProvisioningAndReturnsMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -696,6 +770,59 @@ func TestIndexReturnsNotFoundForUnknownPaths(t *testing.T) {
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestLogoutRequiresCSRFProtectedPOST(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
+	cookies := loginAsDefaultAdmin(t, service)
+	sessionCookie := cookieByName(cookies, sessionCookieName)
+	csrfCookie := cookieByName(cookies, csrfCookieName)
+
+	getRequest := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
+	getRequest.Header.Set("Accept", "text/html")
+	getRequest.AddCookie(sessionCookie)
+	getRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(getRecorder, getRequest)
+	if getRecorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET logout status = %d, want %d", getRecorder.Code, http.StatusMethodNotAllowed)
+	}
+
+	badRequest := httptest.NewRequest(http.MethodPost, "/auth/logout", strings.NewReader("csrf_token=invalid"))
+	badRequest.Header.Set("Accept", "text/html")
+	badRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	badRequest.AddCookie(sessionCookie)
+	badRequest.AddCookie(csrfCookie)
+	badRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(badRecorder, badRequest)
+	if badRecorder.Code != http.StatusForbidden {
+		t.Fatalf("invalid CSRF logout status = %d, want %d", badRecorder.Code, http.StatusForbidden)
+	}
+
+	postRequest := httptest.NewRequest(http.MethodPost, "/auth/logout", strings.NewReader("csrf_token="+url.QueryEscape(csrfCookie.Value)))
+	postRequest.Header.Set("Accept", "text/html")
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postRequest.AddCookie(sessionCookie)
+	postRequest.AddCookie(csrfCookie)
+	postRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(postRecorder, postRequest)
+	if postRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("POST logout status = %d, want %d body=%s", postRecorder.Code, http.StatusSeeOther, postRecorder.Body.String())
+	}
+	if location := postRecorder.Header().Get("Location"); location != "/auth/login" {
+		t.Fatalf("logout redirect = %q, want /auth/login", location)
+	}
+
+	indexRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRequest.Header.Set("Accept", "text/html")
+	indexRequest.AddCookie(sessionCookie)
+	indexRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(indexRecorder, indexRequest)
+	if indexRecorder.Code == http.StatusOK {
+		t.Fatalf("logged-out session remained usable: status=%d body=%s", indexRecorder.Code, indexRecorder.Body.String())
 	}
 }
 
@@ -1105,7 +1232,7 @@ func TestSettingsCanToggleLocalUIAndResetAuth(t *testing.T) {
 	if !strings.Contains(settingsRecorder.Body.String(), "strom-theme-preference") {
 		t.Fatalf("settings page missing persisted theme bootstrap: %s", settingsRecorder.Body.String())
 	}
-	for _, removed := range []string{"<h2>Local UI</h2>", "<h2>Session</h2>", "Signed in as", "action=\"/settings/ui\"", "action=\"/auth/logout\""} {
+	for _, removed := range []string{"<h2>Local UI</h2>", "<h2>Session</h2>", "Signed in as", "action=\"/settings/ui\"", "href=\"/auth/logout\""} {
 		if strings.Contains(settingsRecorder.Body.String(), removed) {
 			t.Fatalf("settings page still contains removed section markup %q: %s", removed, settingsRecorder.Body.String())
 		}
@@ -1113,10 +1240,13 @@ func TestSettingsCanToggleLocalUIAndResetAuth(t *testing.T) {
 	if !strings.Contains(settingsRecorder.Body.String(), "SSH access") {
 		t.Fatalf("settings page missing SSH access controls: %s", settingsRecorder.Body.String())
 	}
-	for _, want := range []string{"Health endpoints", "href=\"/status\"", "href=\"/status/details\"", "href=\"/healthz\"", "href=\"/api/health\"", "API documentation", "action=\"/settings/api-docs\"", "api-docs-enabled-toggle", "ssh-enabled-toggle", "ssh-enable-dialog", "Current dashboard password"} {
+	for _, want := range []string{"Health endpoints", "href=\"/status\"", "href=\"/status/details\"", "href=\"/healthz\"", "href=\"/api/health\"", "<h3>API documentation</h3>", "action=\"/settings/api-docs\"", "api-docs-enabled-toggle", "ssh-enabled-toggle", "ssh-enable-dialog", "Current dashboard password"} {
 		if !strings.Contains(settingsRecorder.Body.String(), want) {
 			t.Fatalf("settings page missing API endpoint or documentation markup %q: %s", want, settingsRecorder.Body.String())
 		}
+	}
+	if strings.Contains(settingsRecorder.Body.String(), "<h2>API documentation</h2>") {
+		t.Fatalf("settings page should combine API documentation into API access: %s", settingsRecorder.Body.String())
 	}
 	if strings.Contains(settingsRecorder.Body.String(), "Open API documentation") {
 		t.Fatalf("settings page should not link to disabled API documentation: %s", settingsRecorder.Body.String())

@@ -4,18 +4,20 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
 import CloseIcon from "@mui/icons-material/Close";
 import ChartCard from "./ChartCard";
 import StatusChip from "./StatusChip";
-import { fetchUPSDetail, fetchUPSHistory, runUPSCommand, type UPSDetailResponse } from "../api";
+import { fetchUPSDetail, fetchUPSHistory, runUPSCommand, updateUPSMetadata, type UPSDetailResponse } from "../api";
 import { useLiveRefresh } from "../hooks/useLiveRefresh";
 import { formatBatteryTrend, formatDuration, humanizeError, statusToSeverity, toChartSeries } from "../lib/format";
 import type { ConfirmRequest, ToastSeverity } from "../types";
@@ -41,6 +43,9 @@ export default function UPSDetailDialog({
   const [loadHistory, setLoadHistory] = useState<Array<{ timestamp: string; value: number }>>([]);
   const [runtimeHistory, setRuntimeHistory] = useState<Array<{ timestamp: string; value: number }>>([]);
   const [error, setError] = useState<string | null>(null);
+  const [metadataEditorOpen, setMetadataEditorOpen] = useState(false);
+  const [metadataForm, setMetadataForm] = useState({ displayName: "", loadDescription: "", locationLabel: "", tags: "" });
+  const [savingMetadata, setSavingMetadata] = useState(false);
   // Guards against a slow response for a previous UPS applying its result
   // after the dialog has closed or switched to a different UPS.
   const activeKeyRef = useRef(`${nodeId}/${upsName}`);
@@ -113,16 +118,53 @@ export default function UPSDetailDialog({
     }
   }
 
+  function openMetadataEditor() {
+    if (!detail) {
+      return;
+    }
+    setMetadataForm({
+      displayName: detail.metadata.display_name,
+      loadDescription: detail.metadata.load_description,
+      locationLabel: detail.metadata.location_label,
+      tags: detail.metadata.tags.join(", "),
+    });
+    setMetadataEditorOpen(true);
+  }
+
+  async function handleMetadataSave() {
+    if (!nodeId || !upsName) {
+      return;
+    }
+    setSavingMetadata(true);
+    try {
+      const response = await updateUPSMetadata(nodeId, upsName, {
+        display_name: metadataForm.displayName.trim(),
+        load_description: metadataForm.loadDescription.trim(),
+        location_label: metadataForm.locationLabel.trim(),
+        tags: metadataForm.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+      });
+      setDetail((current) => current ? { ...current, metadata: response.metadata } : current);
+      setMetadataEditorOpen(false);
+      onToast("UPS details saved.", "success");
+    } catch (saveError) {
+      onToast(humanizeError(saveError, "Unable to save UPS details."), "error");
+    } finally {
+      setSavingMetadata(false);
+    }
+  }
+
   return (
+  <>
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth fullScreen={fullScreen}>
       <DialogTitle sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1.5 }}>
         <Box sx={{ minWidth: 0 }}>
           <Typography variant="h6" component="span" sx={{ display: "block" }}>
-            {detail?.name || upsName || "UPS detail"}
+      {detail?.metadata.display_name || detail?.name || upsName || "UPS detail"}
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Live controller-side UPS detail with 24h charts and instant commands.
+      {detail?.metadata.display_name ? `${detail.name} - ` : ""}Live controller-side UPS detail with 24h charts and instant commands.
           </Typography>
+			{detail?.live ? <Button size="small" onClick={openMetadataEditor} sx={{ mt: 0.5 }}>Edit details</Button> : null}
         </Box>
         <IconButton onClick={onClose} aria-label="Close UPS detail" size="small">
           <CloseIcon fontSize="small" />
@@ -167,6 +209,19 @@ export default function UPSDetailDialog({
                 </Grid>
               ))}
             </Grid>
+
+      {detail.metadata.load_description || detail.metadata.location_label || detail.metadata.tags.length ? (
+        <Box sx={{ mb: 2.5 }}>
+          <Typography variant="h6" component="h3" sx={{ m: 0 }}>
+            UPS details
+          </Typography>
+          <Stack direction="row" spacing={1.5} useFlexGap sx={{ mt: 1, flexWrap: "wrap" }}>
+            {detail.metadata.load_description ? <Typography variant="body2">{detail.metadata.load_description}</Typography> : null}
+            {detail.metadata.location_label ? <Typography variant="body2" color="text.secondary">{detail.metadata.location_label}</Typography> : null}
+            {detail.metadata.tags.map((tag) => <Typography key={tag} variant="caption" sx={{ px: 0.75, py: 0.25, border: 1, borderColor: "divider", borderRadius: 1 }}>{tag}</Typography>)}
+          </Stack>
+        </Box>
+      ) : null}
 
             <Grid container spacing={1.75} sx={{ mb: 2.5 }}>
               <Grid size={{ xs: 12, md: 4 }}>
@@ -254,5 +309,21 @@ export default function UPSDetailDialog({
         )}
       </DialogContent>
     </Dialog>
+    <Dialog open={metadataEditorOpen} onClose={() => !savingMetadata && setMetadataEditorOpen(false)} maxWidth="sm" fullWidth>
+      <DialogTitle>Edit UPS details</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <TextField label="Friendly name" value={metadataForm.displayName} onChange={(event) => setMetadataForm((current) => ({ ...current, displayName: event.target.value }))} slotProps={{ htmlInput: { maxLength: 120 } }} autoFocus />
+          <TextField label="What it powers" value={metadataForm.loadDescription} onChange={(event) => setMetadataForm((current) => ({ ...current, loadDescription: event.target.value }))} slotProps={{ htmlInput: { maxLength: 120 } }} />
+          <TextField label="Location" value={metadataForm.locationLabel} onChange={(event) => setMetadataForm((current) => ({ ...current, locationLabel: event.target.value }))} slotProps={{ htmlInput: { maxLength: 120 } }} />
+          <TextField label="Tags" value={metadataForm.tags} onChange={(event) => setMetadataForm((current) => ({ ...current, tags: event.target.value }))} helperText="Separate tags with commas." slotProps={{ htmlInput: { maxLength: 120 } }} />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setMetadataEditorOpen(false)} disabled={savingMetadata}>Cancel</Button>
+        <Button variant="contained" onClick={() => void handleMetadataSave()} disabled={savingMetadata}>Save details</Button>
+      </DialogActions>
+    </Dialog>
+  </>
   );
 }

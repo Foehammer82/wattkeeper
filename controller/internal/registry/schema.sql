@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS ups (
   node_id TEXT NOT NULL,
   name TEXT NOT NULL,
   driver TEXT NOT NULL,
+	 display_name TEXT NOT NULL DEFAULT '',
+	 load_description TEXT NOT NULL DEFAULT '',
+	 location_label TEXT NOT NULL DEFAULT '',
+	 tags_json TEXT NOT NULL DEFAULT '[]',
   FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
 

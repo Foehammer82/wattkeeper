@@ -257,6 +257,10 @@ automatically with correct device grouping, controls work.
       keeping credentials and controller trust material durable across reboot.
 - [x] Multi-UPS-per-node support verification (USB hub on a 3A+ etc.)
 
+**Implementation status**: Phase 5 is complete. The remaining product work
+starts with a fully capable single-node deployment, then carries those proven
+node capabilities into the controller as fleet-wide functionality.
+
 ## Phase 5.5 - Release orchestration and auto-versioning
 
 Goal: remove manual tag choreography for normal releases by letting merges to
@@ -317,14 +321,14 @@ discovered while doing that validation.
       first-boot behavior: hostname rewrite to `strom-node-<last4 serial>`,
       `strom-state` mount at `/var/lib/strom`, and the OverlayFS first-boot
       reboot
-- [ ] Plug in a real USB UPS and verify zero-config detection: generated
+- [x] Plug in a real USB UPS and verify zero-config detection: generated
       `ups.conf`/`upsd.conf`/`upsd.users`, stable UPS naming across reboots,
       and `nut-server`/`nut-driver@` reload behavior
 - [x] Verify mDNS discoverability (`avahi-browse _strom._tcp`) and
       remote NUT access (`upsc <name>@<pi-ip>`) from another machine
-- [ ] Verify the node local HTTP surface on real hardware: auth bootstrap
+- [x] Verify the node local HTTP surface on real hardware: auth bootstrap
       flow, `GET /status`, `GET /healthz`, and the dashboard UI
-- [ ] Record and fix any bugs, doc gaps, or generated-config issues found
+- [x] Record and fix any bugs, doc gaps, or generated-config issues found
       during this pass, keeping fixes scoped to what real-hardware testing
       actually surfaces
 
@@ -333,29 +337,60 @@ Phase 1 and Phase 2 exit criteria on real hardware, with no manual
 workarounds, and any issues found along the way are fixed or explicitly
 tracked before moving back to controller-side roadmap work.
 
+## Phase 5.7 - Browser-facing TLS
+
+Goal: let operators protect the standalone node dashboard and controller UI
+with HTTPS on trusted LANs without requiring external certificate
+infrastructure.
+
+- [ ] Add opt-in HTTPS listeners for the node local UI and controller web UI,
+      preserving the existing HTTP defaults and clear listen-address controls
+- [ ] Generate a persistent self-signed certificate on first HTTPS-enabled
+      startup, including LAN IP addresses and configured hostnames as SANs;
+      regenerate it only through an explicit operator action
+- [ ] Surface the certificate SHA-256 fingerprint in the local UI, controller
+      UI, logs, and supported CLI/status output so operators can verify the
+      browser trust prompt out of band
+- [ ] Support operator-provided PEM certificate/key files as an alternative to
+      generated certificates, with strict ownership/permission validation and
+      no private-key exposure through APIs, logs, backups, or diagnostics
+- [ ] Keep the adopted controller-to-node pinned TLS channel separate from
+      browser-facing TLS configuration so changing dashboard certificates does
+      not interrupt controller trust or require node re-adoption
+- [ ] Document browser trust for generated certificates, certificate rotation,
+      reverse-proxy deployment, and recovery when a node's persistent state is
+      replaced
+- [ ] Add table-driven configuration/certificate tests and HTTPS integration
+      coverage for both direct self-signed and supplied-certificate modes
+
+**Exit criteria**: an operator can enable HTTPS on a standalone node or the
+controller, verify the generated certificate fingerprint, complete browser
+trust once, and retain HTTPS across restart; supplied certificates work
+without weakening the existing controller-to-node trust channel.
+
 ## Phase 6 - Alerting expansion
 
-Goal: evolve beyond baseline alert events into a full alerting platform for
-production operators and larger fleets.
+Goal: evolve the standalone node beyond baseline alert events into a full
+alerting experience for a single-node deployment.
 
 - [ ] Robust alerting framework with first-class integrations for common
       notification targets such as Discord, Slack, Gotify, Notifiarr,
       Pushbullet, email, Telegram, Signal, and similar services
 - [ ] Alert policies and routing: severity levels, deduplication, quiet
-      hours, maintenance windows, repeat intervals, and
-      per-site/per-node/per-event delivery targets
+      hours, maintenance windows, repeat intervals, and per-event delivery
+      targets
 
 ## Phase 7 - Shutdown orchestration
 
-Goal: coordinate safe, policy-driven shutdown workflows for protected systems
-based on battery/runtime signals.
+Goal: coordinate safe, policy-driven shutdown workflows for systems protected
+by one node, based on its battery and runtime signals.
 
 - [ ] Shutdown orchestration for protected systems based on runtime
       thresholds, battery state, and power-restoration handling
 
 ## Phase 8 - Historical analytics
 
-Goal: improve long-horizon insight for operators who need advanced reporting
+Goal: give a standalone node the long-horizon insight needed for outage review
 and capacity planning.
 
 - [ ] Historical analytics for outage frequency, battery/runtime trends, and
@@ -363,13 +398,33 @@ and capacity planning.
 
 ## Phase 9 - Observability export
 
-Goal: provide optional external observability integration for operators who
-run broader monitoring pipelines.
+Goal: let a standalone node participate in external monitoring pipelines.
 
 - [ ] Optional observability export via metrics endpoint or push integration
       for Prometheus and OpenTelemetry-compatible monitoring pipelines
 
-## Phase 10 — Documentation & roadmap closeout
+## Phase 10 - Controller fleet parity
+
+Goal: build out the controller service after the single-node experience is
+complete, so it provides the same operational capabilities for every adopted
+node while adding fleet-wide visibility and control.
+
+- [ ] Bring node alerting, shutdown orchestration, historical analytics, and
+      observability capabilities into the controller through its trusted
+      multi-node control and telemetry paths
+- [ ] Complete controller APIs and UI workflows so an operator can configure,
+      view, and operate each adopted node's capabilities from one place
+- [ ] Add fleet-wide views, policy/application workflows, and aggregation only
+      where they extend the proven single-node behavior across many nodes
+- [ ] Validate controller behavior against multiple real adopted nodes, keeping
+      per-node local operation functional when a controller is unavailable
+
+**Exit criteria**: every operational capability available on a standalone node
+is available through the controller for each adopted node, while the controller
+adds coherent fleet-wide monitoring and control without replacing node-local
+operation.
+
+## Phase 11 — Documentation & roadmap closeout
 
 - [ ] Update `README.md` so it reflects the shipped architecture, setup flow,
       operational model, and current capabilities rather than planned work

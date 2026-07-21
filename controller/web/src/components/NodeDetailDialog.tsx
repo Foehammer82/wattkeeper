@@ -120,9 +120,12 @@ function OverviewTab({
                 onClick={() => onOpenUPS(summary.name)}
                 sx={{ display: "flex", justifyContent: "space-between", gap: 1.5, borderRadius: 1 }}
               >
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {summary.name}
-                </Typography>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {summary.metadata.display_name || summary.name}
+          </Typography>
+          {summary.metadata.display_name ? <Typography variant="caption" color="text.secondary">{summary.name}</Typography> : null}
+        </Box>
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 0.75, flexWrap: "wrap", minWidth: 0 }}>
                   {summary.status ? <StatusChip label={summary.status} severity={statusToSeverity(summary.status)} /> : null}
                   <Typography variant="body2" color="text.secondary" sx={{ textAlign: "right" }}>

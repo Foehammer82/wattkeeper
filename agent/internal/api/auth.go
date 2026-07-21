@@ -261,6 +261,7 @@ var settingsTemplate = template.Must(template.New("settings").Parse(`<!DOCTYPE h
 		.api-key-list { display:grid; gap:14px; margin-top:16px; }
 		.api-key-row { padding-top:14px; border-top:1px solid var(--line); }
 		.api-key-row:first-child { padding-top:0; border-top:0; }
+		.api-documentation-settings { margin-top:20px; padding-top:20px; border-top:1px solid var(--line); }
 		.api-key-label { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
 		.api-key-label p { margin:4px 0 0; font-size:.9rem; }
 		.api-key-controls { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; margin-top:10px; }
@@ -311,7 +312,7 @@ var settingsTemplate = template.Must(template.New("settings").Parse(`<!DOCTYPE h
 								<span>Docs</span>
 							</a>
 							<div class="menu-divider" role="separator"></div>
-							<a class="menu-link menu-link--sign-out" href="/auth/logout" role="menuitem">Sign out</a>
+							<form class="menu-form" method="post" action="/auth/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="menu-link menu-link--sign-out" type="submit" role="menuitem">Sign out</button></form>
 						</div>
 					</div>
 				</div>
@@ -393,6 +394,25 @@ var settingsTemplate = template.Must(template.New("settings").Parse(`<!DOCTYPE h
 							</div>
 						</div>
 					</div>
+					<div class="api-documentation-settings">
+						<div class="section-head">
+							<div>
+								<h3>API documentation</h3>
+								<p>Enable the local Swagger UI to browse and send requests to the node API. It is disabled by default.</p>
+							</div>
+							<span class="status">{{if .APIDocsEnabled}}Enabled{{else}}Disabled{{end}}</span>
+						</div>
+						{{if .APIDocsEnabled}}<p><a href="/api/docs" target="_blank" rel="noreferrer">Open API documentation</a></p>{{end}}
+						<form id="api-docs-setting-form" class="setting-switch-form" method="post" action="/settings/api-docs">
+							<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+							<input id="api-docs-enabled-value" type="hidden" name="enabled" value="{{if .APIDocsEnabled}}true{{else}}false{{end}}">
+							<label class="setting-switch" for="api-docs-enabled-toggle">
+								<input id="api-docs-enabled-toggle" type="checkbox" {{if .APIDocsEnabled}}checked{{end}} onchange="this.form.elements.enabled.value = this.checked; this.form.submit()">
+								<span class="setting-switch-track" aria-hidden="true"></span>
+								<span>Allow API documentation</span>
+							</label>
+						</form>
+					</div>
 				</section>
 
 				<section class="settings-section">
@@ -403,31 +423,11 @@ var settingsTemplate = template.Must(template.New("settings").Parse(`<!DOCTYPE h
 						</div>
 					</div>
 					<div class="endpoint-links">
-						<a class="link button--secondary endpoint-link" href="/status" target="_blank" rel="noreferrer">Public status</a>
-						<a class="link button--secondary endpoint-link" href="/status/details" target="_blank" rel="noreferrer">Detailed status</a>
-						<a class="link button--secondary endpoint-link" href="/healthz" target="_blank" rel="noreferrer">Health check</a>
-						<a class="link button--secondary endpoint-link" href="/api/health" target="_blank" rel="noreferrer">API health</a>
+						<a class="link button--secondary endpoint-link" href="/status" target="_blank" rel="noreferrer">Public status <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+						<a class="link button--secondary endpoint-link" href="/status/details" target="_blank" rel="noreferrer">Detailed status <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+						<a class="link button--secondary endpoint-link" href="/healthz" target="_blank" rel="noreferrer">Health check <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+						<a class="link button--secondary endpoint-link" href="/api/health" target="_blank" rel="noreferrer">API health <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
 					</div>
-				</section>
-
-				<section class="settings-section">
-					<div class="section-head">
-						<div>
-							<h2>API documentation</h2>
-							<p>Enable the local Swagger UI to browse and send requests to the node API. It is disabled by default.</p>
-						</div>
-						<span class="status">{{if .APIDocsEnabled}}Enabled{{else}}Disabled{{end}}</span>
-					</div>
-					{{if .APIDocsEnabled}}<p><a href="/api/docs" target="_blank" rel="noreferrer">Open API documentation</a></p>{{end}}
-					<form id="api-docs-setting-form" class="setting-switch-form" method="post" action="/settings/api-docs">
-						<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-						<input id="api-docs-enabled-value" type="hidden" name="enabled" value="{{if .APIDocsEnabled}}true{{else}}false{{end}}">
-						<label class="setting-switch" for="api-docs-enabled-toggle">
-							<input id="api-docs-enabled-toggle" type="checkbox" {{if .APIDocsEnabled}}checked{{end}} onchange="this.form.elements.enabled.value = this.checked; this.form.submit()">
-							<span class="setting-switch-track" aria-hidden="true"></span>
-							<span>Allow API documentation</span>
-						</label>
-					</form>
 				</section>
 
 				<section class="settings-section danger-zone">

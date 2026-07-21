@@ -40,7 +40,18 @@ const els = {
   rawJsonModal: document.getElementById("raw-json-modal"),
   rawJsonSubtitle: document.getElementById("raw-json-subtitle"),
   rawJsonContent: document.getElementById("raw-json-content"),
+	  rawJsonCopy: document.getElementById("raw-json-copy"),
   rawJsonClose: document.getElementById("raw-json-close"),
+  upsMetadataModal: document.getElementById("ups-metadata-modal"),
+  upsMetadataSubtitle: document.getElementById("ups-metadata-subtitle"),
+  upsMetadataForm: document.getElementById("ups-metadata-form"),
+  upsMetadataDisplayName: document.getElementById("ups-metadata-display-name"),
+  upsMetadataLoadDescription: document.getElementById("ups-metadata-load-description"),
+  upsMetadataLocation: document.getElementById("ups-metadata-location"),
+  upsMetadataTags: document.getElementById("ups-metadata-tags"),
+  upsMetadataError: document.getElementById("ups-metadata-error"),
+  upsMetadataCancel: document.getElementById("ups-metadata-cancel"),
+  upsMetadataSave: document.getElementById("ups-metadata-save"),
 };
 
 function initTheme() {
@@ -447,12 +458,16 @@ function renderUPSGrid() {
   els.upsGrid.innerHTML = state.upses.map((ups) => {
     const chipClass = statusClass(ups.status);
     const accentClass = chipClass ? `ups-card--${chipClass.replace("chip--", "")}` : "ups-card--good";
+	const metadata = ups.metadata || {};
+	const title = metadata.display_name || ups.name;
+	const context = [metadata.load_description, metadata.location_label].filter(Boolean).join(" · ");
     return `
       <article class="ups-card ${accentClass} ${ups.name === state.selectedUPS ? "is-selected" : ""}" data-ups-name="${escapeAttribute(ups.name)}" tabindex="0">
         <header>
           <div>
-            <h3>${escapeHTML(ups.name)}</h3>
+            <h3>${escapeHTML(title)}</h3>
             <p>${escapeHTML(ups.driver)}</p>
+      			${context ? `<p class="ups-card-context">${escapeHTML(context)}</p>` : ""}
           </div>
           <span class="chip ${chipClass}">${escapeHTML(ups.status)}</span>
         </header>
@@ -494,19 +509,25 @@ function renderDetail() {
   state.dirtyVariables.clear();
   const detail = state.detail;
   const metrics = detail.metrics;
+  const metadata = detail.metadata || {};
+  const title = metadata.display_name || detail.name;
+  const context = [metadata.load_description, metadata.location_label].filter(Boolean).join(" · ");
   els.detail.classList.remove("detail-shell--good", "detail-shell--warn", "detail-shell--danger");
   els.detail.classList.add(accentClassForStatus(detail.status));
   els.detail.innerHTML = `
     <div class="detail-heading">
       <div class="detail-title-row">
-        <h2 class="detail-title">${escapeHTML(detail.name)}</h2>
+        <h2 class="detail-title">${escapeHTML(title)}</h2>
+    		<span class="detail-operational-name">${escapeHTML(detail.name)}</span>
         <span class="detail-meta-driver">${escapeHTML(detail.driver)}</span>
       </div>
       <div class="detail-heading-actions">
         <span class="chip ${statusClass(detail.status)}">${escapeHTML(detail.status)}</span>
+		<button type="button" class="button button--ghost button--compact" id="edit-ups-metadata">Edit details</button>
         <button type="button" class="button button--ghost button--compact" id="view-raw-json">Raw JSON</button>
       </div>
     </div>
+  	${context || metadata.tags?.length ? `<div class="ups-detail-context">${context ? `<span>${escapeHTML(context)}</span>` : ""}${metadata.tags?.length ? metadata.tags.map((tag) => `<span class="tag">${escapeHTML(tag)}</span>`).join("") : ""}</div>` : ""}
 
     <div class="detail-metrics-grid">
       ${detailMetric("Battery charge", formatPercent(metrics.battery_charge_percent))}
@@ -516,6 +537,14 @@ function renderDetail() {
       ${detailMetric("Output voltage", formatVoltage(metrics.output_voltage))}
       ${detailMetric("Battery voltage", formatVoltage(metrics.battery_voltage))}
     </div>
+
+    <section>
+      <div class="section-head">
+        <h3>UPS details</h3>
+        <span class="helper">All reported NUT variables, grouped for scanning.</span>
+      </div>
+      ${renderVariableGroups(detail.variables)}
+    </section>
 
     <section>
       <div class="section-head">
@@ -534,16 +563,20 @@ function renderDetail() {
     </section>
 
     <div class="footer-links">
-      <a href="/status">Public status</a>
-      <a href="/status/details">Detailed JSON</a>
-      <a href="/healthz">Health payload</a>
-      <a href="https://foehammer82.github.io/strom/getting-started/" target="_blank" rel="noreferrer">Docs</a>
+		${renderExternalLink("/status", "Public status")}
+		${renderExternalLink("/status/details", "Detailed JSON")}
+		${renderExternalLink("/healthz", "Health payload")}
+		${renderExternalLink("https://foehammer82.github.io/strom/getting-started/", "Docs")}
     </div>
   `;
 
   document.getElementById("view-raw-json")?.addEventListener("click", () => {
     openRawJsonModal(detail);
   });
+
+	document.getElementById("edit-ups-metadata")?.addEventListener("click", () => {
+		openUPSMetadataModal(detail);
+	});
 
 
   els.detail.querySelectorAll("[data-command]").forEach((button) => {
@@ -585,14 +618,17 @@ function renderCommands(commands) {
       </div>
     `;
   }
-  return `<ul class="action-list">${commands.map((command) => `
+  return `<ul class="action-list">${commands.map((command) => {
+    const presentation = controlPresentation(command);
+    return `
     <li class="action-row ${command.destructive ? "action-row--destructive" : ""}">
       <div class="action-row-text">
         <div class="action-row-title-line">
-          <span class="action-row-title">${escapeHTML(command.name)}</span>
+          <span class="action-row-title">${escapeHTML(presentation.label)}</span>
+		  <span class="action-row-identifier">${escapeHTML(command.name)}</span>
           ${command.destructive ? '<span class="tag tag--danger">Destructive</span>' : ""}
         </div>
-        <p class="action-row-desc">${escapeHTML(command.description || "No description reported by NUT.")}</p>
+        <p class="action-row-desc">${escapeHTML(presentation.description || command.description || "No description reported by NUT.")}</p>
       </div>
       <div class="action-row-controls">
         <button class="button button--compact ${command.destructive ? "button--danger" : "button--primary"}" data-command="${escapeAttribute(command.name)}">
@@ -600,7 +636,8 @@ function renderCommands(commands) {
         </button>
       </div>
     </li>
-  `).join("")}</ul>`;
+  `;
+  }).join("")}</ul>`;
 }
 
 function renderEmptyDetail(message) {
@@ -622,26 +659,94 @@ function renderWritable(writable) {
     `;
   }
   return `
-    <ul class="action-list">${writable.map((variable) => `
+    <ul class="action-list">${writable.map((variable) => {
+      const presentation = controlPresentation(variable);
+      return `
       <li class="action-row" data-variable-row="${escapeAttribute(variable.name)}">
         <div class="action-row-text">
           <div class="action-row-title-line">
-            <span class="action-row-title">${escapeHTML(variable.name)}</span>
+            <span class="action-row-title">${escapeHTML(presentation.label)}</span>
+			<span class="action-row-identifier">${escapeHTML(variable.name)}</span>
             <span class="tag">${escapeHTML(variable.editor)}</span>
             <span class="tag tag--warn action-row-dirty-tag" hidden>Modified</span>
           </div>
-          <p class="action-row-desc">${escapeHTML(variable.description || "No description reported by NUT.")}</p>
+          <p class="action-row-desc">${escapeHTML(presentation.description || variable.description || "No description reported by NUT.")}</p>
         </div>
         <div class="action-row-controls">
           ${renderVariableInput(variable)}
         </div>
       </li>
-    `).join("")}</ul>
+    `;
+    }).join("")}</ul>
     <div class="settings-apply-bar">
       <span id="settings-apply-hint" class="helper">No changes to apply.</span>
       <button id="settings-apply" class="button button--primary" type="button" disabled>Apply changes</button>
     </div>
   `;
+}
+
+const commonControlPresentation = {
+  "beeper.disable": { label: "Disable audible alarm", description: "Turn off the UPS alarm." },
+  "beeper.enable": { label: "Enable audible alarm", description: "Turn on the UPS alarm." },
+  "beeper.mute": { label: "Mute audible alarm", description: "Silence the current UPS alarm." },
+  "beeper.toggle": { label: "Toggle audible alarm", description: "Turn the UPS alarm on or off." },
+  "load.off": { label: "Turn load off", description: "Immediately turn off power to connected equipment." },
+  "load.on": { label: "Turn load on", description: "Turn on power to connected equipment." },
+  "shutdown.return": { label: "Shut down until utility returns", description: "Turn off the load and restore it when utility power returns." },
+  "shutdown.stayoff": { label: "Shut down and stay off", description: "Turn off the load until manually restarted." },
+  "test.battery.start.deep": { label: "Run deep battery test", description: "Start an extended battery self-test." },
+  "test.battery.start.quick": { label: "Run quick battery test", description: "Start a short battery self-test." },
+  "ups.delay.reboot": { label: "Restart delay", description: "Seconds the UPS waits before restarting the load." },
+  "ups.delay.shutdown": { label: "Shutdown delay", description: "Seconds the UPS waits before shutting down the load." },
+  "ups.delay.start": { label: "Startup delay", description: "Seconds the UPS waits before restoring the load." },
+};
+
+function controlPresentation(control) {
+  return commonControlPresentation[control.name] || { label: humanizeNUTIdentifier(control.name), description: "" };
+}
+
+function humanizeNUTIdentifier(name) {
+  return String(name)
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function variableGroupFor(name) {
+  if (name.startsWith("battery.")) return "Battery";
+  if (name.startsWith("input.")) return "Input";
+  if (name.startsWith("output.")) return "Output";
+  if (name.startsWith("ups.")) return "UPS";
+  if (name.startsWith("device.")) return "Device";
+  if (name.startsWith("driver.")) return "Driver";
+  if (name.startsWith("ambient.")) return "Environment";
+  return "Other";
+}
+
+function renderVariableGroups(variables) {
+  const groups = new Map();
+  Object.entries(variables || {}).sort(([left], [right]) => left.localeCompare(right)).forEach(([name, value]) => {
+    const group = variableGroupFor(name);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push([name, value]);
+  });
+  if (groups.size === 0) {
+    return '<div class="empty-state"><p>No NUT variables are currently available.</p></div>';
+  }
+  const order = ["Battery", "Input", "Output", "UPS", "Device", "Driver", "Environment", "Other"];
+  return `<div class="variable-groups">${order.filter((group) => groups.has(group)).map((group) => `
+    <div class="variable-group">
+      <h4>${escapeHTML(group)}</h4>
+      <dl>${groups.get(group).map(([name, value]) => `<div><dt>${escapeHTML(name)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl>
+    </div>
+  `).join("")}</div>`;
+}
+
+const externalLinkIcon = '<svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+
+function renderExternalLink(href, label) {
+  return `<a class="footer-link" href="${escapeAttribute(href)}" target="_blank" rel="noreferrer"><span>${escapeHTML(label)}</span>${externalLinkIcon}</a>`;
 }
 
 function renderVariableInput(variable) {
@@ -681,8 +786,71 @@ function openRawJsonModal(detail) {
   els.rawJsonClose.focus();
 }
 
+async function copyRawJSON() {
+  const value = els.rawJsonContent.textContent;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (_) {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(els.rawJsonContent);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand("copy");
+    selection.removeAllRanges();
+  }
+  showToast("Raw JSON copied.");
+}
+
 function closeRawJsonModal() {
   els.rawJsonModal.classList.remove("is-open");
+}
+
+function openUPSMetadataModal(detail) {
+  const metadata = detail.metadata || {};
+  els.upsMetadataSubtitle.textContent = detail.name;
+  els.upsMetadataDisplayName.value = metadata.display_name || "";
+  els.upsMetadataLoadDescription.value = metadata.load_description || "";
+  els.upsMetadataLocation.value = metadata.location_label || "";
+  els.upsMetadataTags.value = (metadata.tags || []).join(", ");
+  els.upsMetadataError.hidden = true;
+  els.upsMetadataError.textContent = "";
+  els.upsMetadataModal.classList.add("is-open");
+  els.upsMetadataDisplayName.focus();
+}
+
+function closeUPSMetadataModal() {
+  els.upsMetadataModal.classList.remove("is-open");
+}
+
+async function saveUPSMetadata() {
+  if (!state.selectedUPS || !state.detail) {
+    return;
+  }
+  const tags = els.upsMetadataTags.value.split(",").map((tag) => tag.trim()).filter(Boolean);
+  const metadata = {
+    display_name: els.upsMetadataDisplayName.value.trim(),
+    load_description: els.upsMetadataLoadDescription.value.trim(),
+    location_label: els.upsMetadataLocation.value.trim(),
+    tags,
+  };
+  els.upsMetadataSave.disabled = true;
+  els.upsMetadataError.hidden = true;
+  try {
+    await fetchJSON(`/api/ups/${encodeURIComponent(state.selectedUPS)}/metadata`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(metadata),
+    });
+    closeUPSMetadataModal();
+    await refreshAll({ preserveSelection: true, silent: true });
+    showToast("UPS details saved.");
+  } catch (error) {
+    els.upsMetadataError.textContent = error.message;
+    els.upsMetadataError.hidden = false;
+  } finally {
+    els.upsMetadataSave.disabled = false;
+  }
 }
 
 function showToast(message, isError) {
@@ -827,10 +995,21 @@ els.confirmModal.addEventListener("click", (event) => {
 });
 
 els.rawJsonClose.addEventListener("click", closeRawJsonModal);
+els.rawJsonCopy.addEventListener("click", () => { void copyRawJSON(); });
 els.rawJsonModal.addEventListener("click", (event) => {
   if (event.target === els.rawJsonModal) {
     closeRawJsonModal();
   }
+});
+els.upsMetadataCancel.addEventListener("click", closeUPSMetadataModal);
+els.upsMetadataModal.addEventListener("click", (event) => {
+  if (event.target === els.upsMetadataModal) {
+    closeUPSMetadataModal();
+  }
+});
+els.upsMetadataForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveUPSMetadata();
 });
 
 initTheme();

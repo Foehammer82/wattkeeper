@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -69,12 +70,21 @@ type Trust struct {
 type UPSSnapshot struct {
 	Name      string
 	Driver    string
+	Metadata  UPSMetadata
 	Variables map[string]string
+}
+
+type UPSMetadata struct {
+	DisplayName     string   `json:"display_name"`
+	LoadDescription string   `json:"load_description"`
+	LocationLabel   string   `json:"location_label"`
+	Tags            []string `json:"tags"`
 }
 
 type UPSLatestSample struct {
 	Name                 string
 	Driver               string
+	Metadata             UPSMetadata
 	Status               string
 	BatteryChargePercent *float64
 	LoadPercent          *float64
@@ -85,8 +95,34 @@ type UPSLatestSample struct {
 type UPSDetail struct {
 	Name       string
 	Driver     string
+	Metadata   UPSMetadata
 	Variables  map[string]string
 	CapturedAt time.Time
+}
+
+func encodeUPSTags(tags []string) string {
+	if len(tags) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(tags)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func decodeUPSTags(encoded string, tags *[]string) error {
+	if strings.TrimSpace(encoded) == "" {
+		*tags = nil
+		return nil
+	}
+	if err := json.Unmarshal([]byte(encoded), tags); err != nil {
+		return err
+	}
+	if len(*tags) == 0 {
+		*tags = nil
+	}
+	return nil
 }
 
 type UPSHistorySample struct {
@@ -187,6 +223,10 @@ func applySchema(db *sql.DB) error {
 		`ALTER TABLE nodes ADD COLUMN poll_failures INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE nodes ADD COLUMN last_polled_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN last_poll_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ups ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ups ADD COLUMN load_description TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ups ADD COLUMN location_label TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ups ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := db.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			return fmt.Errorf("apply node schema migration: %w", err)
@@ -515,13 +555,13 @@ func (s *Store) RecordUPSSnapshots(ctx context.Context, nodeID string, capturedA
 		upsID := nodeID + ":" + upsName
 		activeIDs = append(activeIDs, upsID)
 		if _, err = tx.ExecContext(ctx, `
-			INSERT INTO ups (id, node_id, name, driver)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO ups (id, node_id, name, driver, display_name, load_description, location_label, tags_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				node_id = excluded.node_id,
 				name = excluded.name,
 				driver = excluded.driver
-		`, upsID, nodeID, upsName, strings.TrimSpace(snapshot.Driver)); err != nil {
+		`, upsID, nodeID, upsName, strings.TrimSpace(snapshot.Driver), snapshot.Metadata.DisplayName, snapshot.Metadata.LoadDescription, snapshot.Metadata.LocationLabel, encodeUPSTags(snapshot.Metadata.Tags)); err != nil {
 			return fmt.Errorf("upsert ups %s: %w", upsID, err)
 		}
 
@@ -558,6 +598,25 @@ func (s *Store) RecordUPSSnapshots(ctx context.Context, nodeID string, capturedA
 
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit UPS sample transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) UpdateUPSMetadata(ctx context.Context, nodeID, upsName string, metadata UPSMetadata) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE ups
+		SET display_name = ?, load_description = ?, location_label = ?, tags_json = ?
+		WHERE node_id = ? AND name = ?
+	`, metadata.DisplayName, metadata.LoadDescription, metadata.LocationLabel, encodeUPSTags(metadata.Tags), nodeID, upsName)
+	if err != nil {
+		return fmt.Errorf("update UPS metadata %s/%s: %w", nodeID, upsName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read UPS metadata update count: %w", err)
+	}
+	if affected == 0 {
+		return ErrUPSNotFound
 	}
 	return nil
 }
@@ -858,7 +917,7 @@ func (s *Store) SaveControllerSettings(ctx context.Context, settings ControllerS
 
 func (s *Store) ListNodeUPSSummaries(ctx context.Context, nodeID string) ([]UPSLatestSample, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT u.id, u.name, u.driver, latest.variable, latest.value, latest.captured_at
+		SELECT u.id, u.name, u.driver, u.display_name, u.load_description, u.location_label, u.tags_json, latest.variable, latest.value, latest.captured_at
 		FROM ups u
 		LEFT JOIN (
 			SELECT s1.ups_id, s1.variable, s1.value, s1.captured_at
@@ -890,15 +949,20 @@ func (s *Store) ListNodeUPSSummaries(ctx context.Context, nodeID string) ([]UPSL
 		var upsID string
 		var name string
 		var driver string
+		var metadata UPSMetadata
+		var tagsJSON string
 		var variable sql.NullString
 		var value sql.NullString
 		var capturedAt sql.NullString
-		if err := rows.Scan(&upsID, &name, &driver, &variable, &value, &capturedAt); err != nil {
+		if err := rows.Scan(&upsID, &name, &driver, &metadata.DisplayName, &metadata.LoadDescription, &metadata.LocationLabel, &tagsJSON, &variable, &value, &capturedAt); err != nil {
 			return nil, fmt.Errorf("scan UPS summary row: %w", err)
+		}
+		if err := decodeUPSTags(tagsJSON, &metadata.Tags); err != nil {
+			return nil, fmt.Errorf("decode UPS summary tags: %w", err)
 		}
 		agg, ok := byID[upsID]
 		if !ok {
-			agg = &aggregate{summary: UPSLatestSample{Name: name, Driver: driver}}
+			agg = &aggregate{summary: UPSLatestSample{Name: name, Driver: driver, Metadata: metadata}}
 			byID[upsID] = agg
 			ordered = append(ordered, upsID)
 		}
@@ -929,17 +993,21 @@ func (s *Store) ListNodeUPSSummaries(ctx context.Context, nodeID string) ([]UPSL
 
 func (s *Store) GetUPSDetail(ctx context.Context, nodeID, upsName string) (UPSDetail, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT u.id, u.name, u.driver
+		SELECT u.id, u.name, u.driver, u.display_name, u.load_description, u.location_label, u.tags_json
 		FROM ups u
 		WHERE u.node_id = ? AND u.name = ?
 	`, nodeID, upsName)
 	var upsID string
 	var detail UPSDetail
-	if err := row.Scan(&upsID, &detail.Name, &detail.Driver); err != nil {
+	var tagsJSON string
+	if err := row.Scan(&upsID, &detail.Name, &detail.Driver, &detail.Metadata.DisplayName, &detail.Metadata.LoadDescription, &detail.Metadata.LocationLabel, &tagsJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return UPSDetail{}, ErrUPSNotFound
 		}
 		return UPSDetail{}, fmt.Errorf("load UPS detail %s/%s: %w", nodeID, upsName, err)
+	}
+	if err := decodeUPSTags(tagsJSON, &detail.Metadata.Tags); err != nil {
+		return UPSDetail{}, fmt.Errorf("decode UPS detail tags: %w", err)
 	}
 	detail.Variables = make(map[string]string)
 

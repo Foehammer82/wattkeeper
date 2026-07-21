@@ -99,13 +99,14 @@ type nodeResponse struct {
 }
 
 type upsSummaryResponse struct {
-	Name                 string    `json:"name"`
-	Driver               string    `json:"driver"`
-	Status               string    `json:"status,omitempty"`
-	BatteryChargePercent *float64  `json:"battery_charge_percent,omitempty"`
-	LoadPercent          *float64  `json:"load_percent,omitempty"`
-	RuntimeSeconds       *int64    `json:"runtime_seconds,omitempty"`
-	CapturedAt           time.Time `json:"captured_at,omitempty"`
+	Name                 string               `json:"name"`
+	Driver               string               `json:"driver"`
+	Metadata             registry.UPSMetadata `json:"metadata"`
+	Status               string               `json:"status,omitempty"`
+	BatteryChargePercent *float64             `json:"battery_charge_percent,omitempty"`
+	LoadPercent          *float64             `json:"load_percent,omitempty"`
+	RuntimeSeconds       *int64               `json:"runtime_seconds,omitempty"`
+	CapturedAt           time.Time            `json:"captured_at,omitempty"`
 }
 
 type upsCommandDescriptor struct {
@@ -149,6 +150,7 @@ type nodeUPSDetailResponse struct {
 	NodeID              string                   `json:"node_id"`
 	Name                string                   `json:"name"`
 	Driver              string                   `json:"driver"`
+	Metadata            registry.UPSMetadata     `json:"metadata"`
 	Status              string                   `json:"status,omitempty"`
 	Metrics             *upsSummaryResponse      `json:"metrics,omitempty"`
 	BatteryRuntimeTrend *batteryTrendResponse    `json:"battery_runtime_trend,omitempty"`
@@ -236,12 +238,18 @@ type nodeUPSCommandResponse struct {
 type agentUPSDetailResponse struct {
 	Name      string                   `json:"name"`
 	Driver    string                   `json:"driver"`
+	Metadata  registry.UPSMetadata     `json:"metadata"`
 	Status    string                   `json:"status"`
 	Metrics   upsSummaryResponse       `json:"metrics"`
 	Variables map[string]string        `json:"variables"`
 	Commands  []upsCommandDescriptor   `json:"commands"`
 	Writable  []upsWritableVarResponse `json:"writable"`
 	UpdatedAt time.Time                `json:"updated_at"`
+}
+
+type agentUPSMetadataResponse struct {
+	UPS      string               `json:"ups"`
+	Metadata registry.UPSMetadata `json:"metadata"`
 }
 
 type agentUPSCommandResponse struct {
@@ -1158,6 +1166,10 @@ func (a *app) handleNodes(w http.ResponseWriter, r *http.Request) {
 		a.handleAdoptNode(w, r)
 		return
 	}
+	if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/ups/") {
+		a.handleNodeUPS(w, r)
+		return
+	}
 	if r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/nodes/") {
 		a.handleUpdateNodeMetadata(w, r)
 		return
@@ -1210,8 +1222,8 @@ func (a *app) handleNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleNodeUPS(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodPatch {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost+", "+http.MethodPatch)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -1240,6 +1252,55 @@ func (a *app) handleNodeUPS(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid UPS name")
 		return
 	}
+	if len(parts) == 4 && parts[3] == "metadata" {
+		if r.Method != http.MethodPatch {
+			w.Header().Set("Allow", http.MethodPatch)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var metadata registry.UPSMetadata
+		if err := json.NewDecoder(r.Body).Decode(&metadata); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("decode UPS metadata: %v", err))
+			return
+		}
+		node, err := a.buildNodeResponse(r.Context(), nodeID)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrNodeNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		if !node.Adopted || !node.Live {
+			writeJSONError(w, http.StatusConflict, "UPS details can only be edited while the adopted node is online")
+			return
+		}
+		response, err := a.updateTrustedUPSMetadata(r.Context(), nodeID, upsName, metadata)
+		if err != nil {
+			status := http.StatusBadGateway
+			switch {
+			case errors.Is(err, registry.ErrNodeNotFound), errors.Is(err, registry.ErrUPSNotFound):
+				status = http.StatusNotFound
+			case errors.Is(err, errTrustedNodeUnauthorized):
+				status = http.StatusUnauthorized
+			case errors.Is(err, errTrustedNodeFingerprintDrift):
+				status = http.StatusConflict
+			}
+			writeJSONError(w, status, trustedNodeErrorMessage(err))
+			return
+		}
+		if err := a.registry.UpdateUPSMetadata(r.Context(), nodeID, upsName, response.Metadata); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrUPSNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 	if len(parts) == 3 {
 		node, err := a.buildNodeResponse(r.Context(), nodeID)
 		if err != nil {
@@ -1259,7 +1320,7 @@ func (a *app) handleNodeUPS(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, status, err.Error())
 			return
 		}
-		response := nodeUPSDetailResponse{NodeID: nodeID, Name: detail.Name, Driver: detail.Driver, Variables: detail.Variables, CapturedAt: detail.CapturedAt, Live: node.Live}
+		response := nodeUPSDetailResponse{NodeID: nodeID, Name: detail.Name, Driver: detail.Driver, Metadata: detail.Metadata, Variables: detail.Variables, CapturedAt: detail.CapturedAt, Live: node.Live}
 		if len(node.UPSSummaries) > 0 {
 			for _, summary := range node.UPSSummaries {
 				if summary.Name == upsName {
@@ -1285,6 +1346,7 @@ func (a *app) handleNodeUPS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				response.Driver = firstNonEmpty(response.Driver, liveDetail.Driver)
+				response.Metadata = liveDetail.Metadata
 				response.Status = liveDetail.Status
 				response.Metrics = &liveDetail.Metrics
 				response.Variables = liveDetail.Variables
@@ -1708,6 +1770,7 @@ func toUPSSummaryResponses(summaries []registry.UPSLatestSample) []upsSummaryRes
 		responses = append(responses, upsSummaryResponse{
 			Name:                 summary.Name,
 			Driver:               summary.Driver,
+			Metadata:             summary.Metadata,
 			Status:               summary.Status,
 			BatteryChargePercent: summary.BatteryChargePercent,
 			LoadPercent:          summary.LoadPercent,
@@ -1952,6 +2015,12 @@ func (a *app) fetchTrustedUPSDetail(ctx context.Context, nodeID, upsName string)
 func (a *app) runTrustedUPSCommand(ctx context.Context, nodeID, upsName, command string) (agentUPSCommandResponse, error) {
 	var response agentUPSCommandResponse
 	err := a.doTrustedNodeJSON(ctx, nodeID, http.MethodPost, "/api/ups/"+url.PathEscape(upsName)+"/command", nodeUPSCommandRequest{Command: command}, &response)
+	return response, err
+}
+
+func (a *app) updateTrustedUPSMetadata(ctx context.Context, nodeID, upsName string, metadata registry.UPSMetadata) (agentUPSMetadataResponse, error) {
+	var response agentUPSMetadataResponse
+	err := a.doTrustedNodeJSON(ctx, nodeID, http.MethodPatch, "/api/ups/"+url.PathEscape(upsName)+"/metadata", metadata, &response)
 	return response, err
 }
 

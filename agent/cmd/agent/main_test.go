@@ -463,6 +463,16 @@ func TestApplyFactoryResetIfRequestedNoMarker(t *testing.T) {
 	}
 }
 
+func TestFactoryResetStatePathsIncludeUPSMetadata(t *testing.T) {
+	paths := factoryResetStatePaths(defaultWebAuthPath)
+	for _, path := range paths {
+		if path == defaultUPSMetadataPath {
+			return
+		}
+	}
+	t.Fatalf("factoryResetStatePaths() = %v, want %q", paths, defaultUPSMetadataPath)
+}
+
 func TestParseFlagsEnablesHTTPAuthByDefault(t *testing.T) {
 	t.Parallel()
 

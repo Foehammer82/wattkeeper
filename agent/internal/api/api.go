@@ -55,23 +55,24 @@ func (execRunner) CombinedOutput(ctx context.Context, path string, args ...strin
 }
 
 type Options struct {
-	Version      string
-	Serial       string
-	StartedAt    time.Time
-	Runner       commandRunner
-	UPSCPath     string
-	UPSCmdPath   string
-	UPSRWPath    string
-	CPUTempPath  string
-	RootPath     string
-	AdoptionPath string
-	DisableAuth  bool
-	AuthPath     string
-	AgentBinary  string
-	NUTUser      string
-	NUTPassword  string
-	Adopter      adoptionHandler
-	SSHAccess    sshAccessManager
+	Version         string
+	Serial          string
+	StartedAt       time.Time
+	Runner          commandRunner
+	UPSCPath        string
+	UPSCmdPath      string
+	UPSRWPath       string
+	CPUTempPath     string
+	RootPath        string
+	AdoptionPath    string
+	DisableAuth     bool
+	AuthPath        string
+	UPSMetadataPath string
+	AgentBinary     string
+	NUTUser         string
+	NUTPassword     string
+	Adopter         adoptionHandler
+	SSHAccess       sshAccessManager
 }
 
 type adoptionHandler interface {
@@ -79,27 +80,29 @@ type adoptionHandler interface {
 }
 
 type Service struct {
-	logger       *log.Logger
-	version      string
-	serial       string
-	startedAt    time.Time
-	runner       commandRunner
-	upscPath     string
-	upscmdPath   string
-	upsrwPath    string
-	cpuTempPath  string
-	rootPath     string
-	adoptionPath string
-	agentBinary  string
-	nutUser      string
-	nutPassword  string
-	auth         *authManager
-	adopter      adoptionHandler
-	sshAccess    sshAccessManager
+	logger          *log.Logger
+	version         string
+	serial          string
+	startedAt       time.Time
+	runner          commandRunner
+	upscPath        string
+	upscmdPath      string
+	upsrwPath       string
+	cpuTempPath     string
+	rootPath        string
+	adoptionPath    string
+	upsMetadataPath string
+	agentBinary     string
+	nutUser         string
+	nutPassword     string
+	auth            *authManager
+	adopter         adoptionHandler
+	sshAccess       sshAccessManager
 
-	mu      sync.RWMutex
-	devices []nutconf.DetectedUPS
-	cache   http.Handler
+	mu          sync.RWMutex
+	devices     []nutconf.DetectedUPS
+	upsMetadata map[string]upsMetadata
+	cache       http.Handler
 }
 
 type healthResponse struct {
@@ -131,15 +134,16 @@ type statusResponse struct {
 }
 
 type upsHealth struct {
-	Name                 string   `json:"name"`
-	Driver               string   `json:"driver"`
-	Status               string   `json:"status"`
-	BatteryChargePercent *float64 `json:"battery_charge_percent,omitempty"`
-	LoadPercent          *float64 `json:"load_percent,omitempty"`
-	RuntimeSeconds       *int64   `json:"runtime_seconds,omitempty"`
-	InputVoltage         *float64 `json:"input_voltage,omitempty"`
-	OutputVoltage        *float64 `json:"output_voltage,omitempty"`
-	BatteryVoltage       *float64 `json:"battery_voltage,omitempty"`
+	Name                 string      `json:"name"`
+	Driver               string      `json:"driver"`
+	Metadata             upsMetadata `json:"metadata"`
+	Status               string      `json:"status"`
+	BatteryChargePercent *float64    `json:"battery_charge_percent,omitempty"`
+	LoadPercent          *float64    `json:"load_percent,omitempty"`
+	RuntimeSeconds       *int64      `json:"runtime_seconds,omitempty"`
+	InputVoltage         *float64    `json:"input_voltage,omitempty"`
+	OutputVoltage        *float64    `json:"output_voltage,omitempty"`
+	BatteryVoltage       *float64    `json:"battery_voltage,omitempty"`
 }
 
 type upsCommand struct {
@@ -151,6 +155,7 @@ type upsCommand struct {
 type upsDetailResponse struct {
 	Name      string            `json:"name"`
 	Driver    string            `json:"driver"`
+	Metadata  upsMetadata       `json:"metadata"`
 	Status    string            `json:"status"`
 	Metrics   upsHealth         `json:"metrics"`
 	Variables map[string]string `json:"variables"`
@@ -171,6 +176,11 @@ type upsWritableVar struct {
 
 type upsCommandRequest struct {
 	Command string `json:"cmd"`
+}
+
+type upsMetadataResponse struct {
+	UPS      string      `json:"ups"`
+	Metadata upsMetadata `json:"metadata"`
 }
 
 type upsCommandResponse struct {
@@ -235,10 +245,12 @@ type indexViewModel struct {
 	Health      healthResponse
 	AuthEnabled bool
 	Username    string
+	CSRFToken   string
 }
 
 type diagnosticsViewModel struct {
 	Username    string
+	CSRFToken   string
 	Diagnostics diagnosticsResponse
 }
 
@@ -380,7 +392,7 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 								</span>
 								<span>Docs</span>
 							</a>
-							{{if .AuthEnabled}}<div class="menu-divider" role="separator"></div><a class="menu-link menu-link--sign-out" href="/auth/logout" role="menuitem">Sign out</a>{{end}}
+							{{if .AuthEnabled}}<div class="menu-divider" role="separator"></div><form class="menu-form" method="post" action="/auth/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="menu-link menu-link--sign-out" type="submit" role="menuitem">Sign out</button></form>{{end}}
 						</div>
 					</div>
 				</div>
@@ -403,10 +415,7 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 		<section class="layout">
 			<div class="stack">
 				<section class="surface hero">
-					<div class="section-head">
-						<h2>UPS inventory</h2>
-					</div>
-					<div id="ups-grid" class="ups-grid">
+					<div id="ups-grid" class="ups-grid" aria-label="UPS inventory">
 						{{if .Health.UPSes}}
 							{{range .Health.UPSes}}
 							<article class="ups-card">
@@ -467,8 +476,32 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 			<p id="raw-json-subtitle" class="helper"></p>
 			<div class="json-card"><pre id="raw-json-content"></pre></div>
 			<div class="modal-actions">
+				<button id="raw-json-copy" class="button button--ghost" type="button">Copy JSON</button>
 				<button id="raw-json-close" class="button button--ghost" type="button">Close</button>
 			</div>
+		</div>
+	</div>
+	<div id="ups-metadata-modal" class="modal" aria-hidden="true">
+		<div class="surface modal-card" role="dialog" aria-modal="true" aria-labelledby="ups-metadata-title">
+			<span class="eyebrow">UPS details</span>
+			<h2 id="ups-metadata-title">Edit UPS details</h2>
+			<p id="ups-metadata-subtitle" class="helper"></p>
+			<form id="ups-metadata-form" class="metadata-form">
+				<label for="ups-metadata-display-name">Friendly name</label>
+				<input id="ups-metadata-display-name" name="display_name" maxlength="120" autocomplete="off">
+				<label for="ups-metadata-load-description">What it powers</label>
+				<input id="ups-metadata-load-description" name="load_description" maxlength="120" autocomplete="off">
+				<label for="ups-metadata-location">Location</label>
+				<input id="ups-metadata-location" name="location_label" maxlength="120" autocomplete="off">
+				<label for="ups-metadata-tags">Tags</label>
+				<input id="ups-metadata-tags" name="tags" maxlength="120" autocomplete="off" aria-describedby="ups-metadata-tags-help">
+				<p id="ups-metadata-tags-help" class="helper">Separate tags with commas.</p>
+				<p id="ups-metadata-error" class="metadata-error" role="alert" hidden></p>
+				<div class="modal-actions">
+					<button id="ups-metadata-cancel" class="button button--ghost" type="button">Cancel</button>
+					<button id="ups-metadata-save" class="button button--primary" type="submit">Save details</button>
+				</div>
+			</form>
 		</div>
 	</div>
 	<script src="/assets/app.js" defer></script>
@@ -515,7 +548,7 @@ var diagnosticsTemplate = template.Must(template.New("diagnostics").Parse(`<!DOC
 								<span>Docs</span>
 							</a>
 							<div class="menu-divider" role="separator"></div>
-							<a class="menu-link menu-link--sign-out" href="/auth/logout" role="menuitem">Sign out</a>
+							<form class="menu-form" method="post" action="/auth/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="menu-link menu-link--sign-out" type="submit" role="menuitem">Sign out</button></form>
 						</div>
 					</div>
 				</div>
@@ -599,27 +632,36 @@ func New(logger *log.Logger, opts Options) *Service {
 	}
 
 	service := &Service{
-		logger:       logger,
-		version:      defaultString(opts.Version, "dev"),
-		serial:       opts.Serial,
-		startedAt:    startedAt,
-		runner:       runner,
-		upscPath:     upscPath,
-		upscmdPath:   upscmdPath,
-		upsrwPath:    upsrwPath,
-		cpuTempPath:  cpuTempPath,
-		rootPath:     rootPath,
-		adoptionPath: opts.AdoptionPath,
-		agentBinary:  strings.TrimSpace(opts.AgentBinary),
-		nutUser:      opts.NUTUser,
-		nutPassword:  opts.NUTPassword,
-		auth:         newAuthManager(opts.DisableAuth, opts.AuthPath, logger),
-		adopter:      opts.Adopter,
-		sshAccess:    opts.SSHAccess,
+		logger:          logger,
+		version:         defaultString(opts.Version, "dev"),
+		serial:          opts.Serial,
+		startedAt:       startedAt,
+		runner:          runner,
+		upscPath:        upscPath,
+		upscmdPath:      upscmdPath,
+		upsrwPath:       upsrwPath,
+		cpuTempPath:     cpuTempPath,
+		rootPath:        rootPath,
+		adoptionPath:    opts.AdoptionPath,
+		upsMetadataPath: opts.UPSMetadataPath,
+		agentBinary:     strings.TrimSpace(opts.AgentBinary),
+		nutUser:         opts.NUTUser,
+		nutPassword:     opts.NUTPassword,
+		auth:            newAuthManager(opts.DisableAuth, opts.AuthPath, logger),
+		adopter:         opts.Adopter,
+		sshAccess:       opts.SSHAccess,
 	}
 	if service.sshAccess == nil {
 		service.sshAccess = newSystemSSHAccessManager(rootPath)
 	}
+	metadata, err := loadUPSMetadata(service.upsMetadataPath)
+	if err != nil && logger != nil {
+		logger.Printf("load UPS metadata failed: %v", err)
+	}
+	if metadata == nil {
+		metadata = map[string]upsMetadata{}
+	}
+	service.upsMetadata = metadata
 	service.cache = service.loggingMiddleware(service.routes())
 	return service
 }
@@ -690,6 +732,7 @@ func (s *Service) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var username string
+	var csrfToken string
 	if s.auth.Enabled() {
 		sessionUsername, ok := s.requireSession(w, r)
 		if !ok {
@@ -705,6 +748,11 @@ func (s *Service) handleIndex(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/settings?message=local-ui-disabled", http.StatusSeeOther)
 			return
 		}
+		csrfToken, err = s.auth.SessionCSRFToken(r)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "load CSRF token")
+			return
+		}
 	}
 
 	response, err := s.buildHealthResponse(r.Context())
@@ -714,7 +762,7 @@ func (s *Service) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := indexTemplate.Execute(w, indexViewModel{GeneratedAt: time.Now(), Health: response, AuthEnabled: s.auth.Enabled(), Username: username}); err != nil && s.logger != nil {
+	if err := indexTemplate.Execute(w, indexViewModel{GeneratedAt: time.Now(), Health: response, AuthEnabled: s.auth.Enabled(), Username: username, CSRFToken: csrfToken}); err != nil && s.logger != nil {
 		s.logger.Printf("render index failed: %v", err)
 	}
 }
@@ -1640,8 +1688,13 @@ func (s *Service) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	csrfToken, err := s.auth.SessionCSRFToken(r)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "load CSRF token")
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := diagnosticsTemplate.Execute(w, diagnosticsViewModel{Username: username, Diagnostics: s.buildDiagnosticsResponse(r.Context())}); err != nil && s.logger != nil {
+	if err := diagnosticsTemplate.Execute(w, diagnosticsViewModel{Username: username, CSRFToken: csrfToken, Diagnostics: s.buildDiagnosticsResponse(r.Context())}); err != nil && s.logger != nil {
 		s.logger.Printf("render diagnostics failed: %v", err)
 	}
 }
@@ -1715,6 +1768,30 @@ func (s *Service) handleAPIUPS(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, errUPSNotFound):
 				status = http.StatusNotFound
 			case errors.Is(err, errUPSCommandNotFound), errors.Is(err, errUPSControlUnavailable):
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	case len(parts) == 2 && parts[1] == "metadata":
+		if r.Method != http.MethodPatch {
+			w.Header().Set("Allow", http.MethodPatch)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !s.requireWriteAccess(w, r) {
+			return
+		}
+		var metadata upsMetadata
+		if err := json.NewDecoder(r.Body).Decode(&metadata); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("decode UPS metadata: %v", err))
+			return
+		}
+		response, err := s.updateUPSMetadata(name, metadata)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errUPSNotFound) || strings.Contains(err.Error(), "must be") || strings.Contains(err.Error(), "metadata cannot") || strings.Contains(err.Error(), "tags are allowed") {
 				status = http.StatusBadRequest
 			}
 			writeJSONError(w, status, err.Error())
@@ -2052,7 +2129,9 @@ func (s *Service) buildUPSStatuses(ctx context.Context) []upsHealth {
 			}
 		}
 
-		upses = append(upses, buildUPSHealth(device, snapshot))
+		health := buildUPSHealth(device, snapshot)
+		health.Metadata = s.metadataForUPS(device.Name)
+		upses = append(upses, health)
 	}
 
 	return upses
@@ -2089,6 +2168,7 @@ func (s *Service) buildUPSDetailResponse(ctx context.Context, name string) (upsD
 	return upsDetailResponse{
 		Name:      device.Name,
 		Driver:    device.Driver,
+		Metadata:  s.metadataForUPS(device.Name),
 		Status:    metrics.Status,
 		Metrics:   metrics,
 		Variables: snapshot.Variables,
@@ -2293,6 +2373,42 @@ func (s *Service) lookupUPS(name string) (nutconf.DetectedUPS, bool) {
 		}
 	}
 	return nutconf.DetectedUPS{}, false
+}
+
+func (s *Service) metadataForUPS(name string) upsMetadata {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.upsMetadata[name]
+}
+
+func (s *Service) updateUPSMetadata(name string, metadata upsMetadata) (upsMetadataResponse, error) {
+	if _, ok := s.lookupUPS(name); !ok {
+		return upsMetadataResponse{}, fmt.Errorf("%w: %s", errUPSNotFound, name)
+	}
+	normalized, err := normalizeUPSMetadata(metadata)
+	if err != nil {
+		return upsMetadataResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]upsMetadata, len(s.upsMetadata)+1)
+	for key, value := range s.upsMetadata {
+		next[key] = value
+	}
+	if isEmptyUPSMetadata(normalized) {
+		delete(next, name)
+	} else {
+		next[name] = normalized
+	}
+	if _, err := saveUPSMetadata(s.upsMetadataPath, next); err != nil {
+		return upsMetadataResponse{}, err
+	}
+	s.upsMetadata = next
+	return upsMetadataResponse{UPS: name, Metadata: normalized}, nil
+}
+
+func isEmptyUPSMetadata(metadata upsMetadata) bool {
+	return metadata.DisplayName == "" && metadata.LoadDescription == "" && metadata.LocationLabel == "" && len(metadata.Tags) == 0
 }
 
 func (s *Service) currentNUTUser() string {

@@ -1,11 +1,19 @@
 export type UPSummary = {
   name: string;
   driver: string;
+	metadata: UPSMetadata;
   status?: string;
   battery_charge_percent?: number;
   load_percent?: number;
   runtime_seconds?: number;
   captured_at?: string;
+};
+
+export type UPSMetadata = {
+  display_name: string;
+  load_description: string;
+  location_label: string;
+  tags: string[];
 };
 
 export type NodeRecord = {
@@ -48,6 +56,7 @@ export type UPSDetailResponse = {
   node_id: string;
   name: string;
   driver: string;
+	metadata: UPSMetadata;
   status?: string;
   metrics?: UPSummary;
   battery_runtime_trend?: {
@@ -143,6 +152,13 @@ export function runUPSCommand(nodeID: string, upsName: string, command: string) 
   return requestJSON<{ ups: string; command: string; output: string }>(`/api/nodes/${encodeURIComponent(nodeID)}/ups/${encodeURIComponent(upsName)}/command`, {
     method: "POST",
     body: JSON.stringify({ cmd: command }),
+  });
+}
+
+export function updateUPSMetadata(nodeID: string, upsName: string, metadata: UPSMetadata) {
+  return requestJSON<{ ups: string; metadata: UPSMetadata }>(`/api/nodes/${encodeURIComponent(nodeID)}/ups/${encodeURIComponent(upsName)}/metadata`, {
+    method: "PATCH",
+    body: JSON.stringify(metadata),
   });
 }
 

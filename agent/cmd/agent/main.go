@@ -37,6 +37,7 @@ const (
 	defaultTLSCertPath     = "/var/lib/strom/node-api.crt"
 	defaultTLSKeyPath      = "/var/lib/strom/node-api.key"
 	defaultWebAuthPath     = "/var/lib/strom/webui-auth.json"
+	defaultUPSMetadataPath = "/var/lib/strom/ups-metadata.json"
 	factoryResetMarkerPath = "/boot/firmware/strom-factory-reset"
 	factoryResetLegacyPath = "/boot/strom-factory-reset"
 	mdnsRetryInterval      = 5 * time.Second
@@ -403,7 +404,7 @@ func retryMDNSRegistration(ctx context.Context, logger *log.Logger, retryInterva
 }
 
 func factoryResetStatePaths(authPath string) []string {
-	paths := []string{defaultAdoptionPath, defaultTLSCertPath, defaultTLSKeyPath, defaultNamesPath}
+	paths := []string{defaultAdoptionPath, defaultTLSCertPath, defaultTLSKeyPath, defaultNamesPath, defaultUPSMetadataPath}
 	if strings.TrimSpace(authPath) != "" {
 		paths = append(paths, authPath)
 	}
