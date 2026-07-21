@@ -361,6 +361,7 @@ select {
 }
 
 .metric-card {
+  min-width: 0;
   padding: 16px;
 }
 
@@ -378,8 +379,10 @@ select {
 }
 
 .metric-value {
+  min-width: 0;
   font-size: clamp(1.2rem, 2vw, 1.7rem);
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .helper {
