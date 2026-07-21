@@ -119,6 +119,7 @@ extract_qemu_from_docker() {
 		echo "failed to extract qemu-aarch64-static from ${QEMU_HELPER_IMAGE}" >&2
 		exit 1
 	fi
+	ln -sf qemu-aarch64 "$BIN_DIR/qemu-aarch64-static"
 	docker rm -f "$container_name" >/dev/null 2>&1 || true
 	chmod 0755 "$BIN_DIR/qemu-aarch64"
 }

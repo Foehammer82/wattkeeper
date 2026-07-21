@@ -26,7 +26,7 @@ def test_image_creates_and_mounts_persistent_state_partition() -> None:
     export = EXPORT_PRERUN.read_text(encoding="utf-8")
 
     assert "LABEL=strom-state /var/lib/strom ext4 defaults,nofail" in stage
-    assert "STROM_STATE_PART_SIZE_MB" in config
+    assert 'export STROM_STATE_PART_SIZE_MB="${STROM_STATE_PART_SIZE_MB:-256}"' in config
     assert "EXPORT_CONFIG_DIR" in config
     assert "STATE_DEV=\"${LOOP_DEV}p3\"" in export
     assert "mkfs.ext4 -L strom-state" in export
