@@ -29,9 +29,9 @@ The agent exposes a node dashboard at `/` plus JSON endpoints at `GET /status` a
 
 `POST /api/agent/update` is the controller-authenticated OTA endpoint for signed agent binary pushes. The node expects `version`, `binary_base64`, `sha256`, and `signature_base64`, verifies the signature against the adopted controller CA certificate, and atomically replaces the local agent binary when verification succeeds.
 
-On an uninitialized node with auth enabled, visiting `/` presents a bootstrap page that creates the local admin account. After bootstrap, `/`, `/status/details`, `/healthz`, and `/settings` require a session cookie created by `POST /auth/login`. For development only, auth can be bypassed with `--http-auth=false`.
+On an uninitialized node with auth enabled, visiting `/` redirects to `/auth/bootstrap`, which prompts for a password for the single local `admin` account (there is no built-in default password). After bootstrap, `/`, `/status/details`, `/healthz`, and `/settings` require a session cookie created by `POST /auth/login` (bootstrap itself also starts a session). For development only, auth can be bypassed with `--http-auth=false`.
 
-To manually reset local web auth on a node, remove `/var/lib/wattkeeper/webui-auth.json` and revisit `/`.
+To manually reset local web auth on a node, remove `/var/lib/wattkeeper/webui-auth.json` and revisit `/`; the node returns to the bootstrap flow.
 
 When the controller marks local UI policy as managed for an adopted node, the local settings toggle is locked. Releasing policy from the controller returns control to the node-local admin in `/settings`.
 

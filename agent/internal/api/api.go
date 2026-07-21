@@ -515,6 +515,7 @@ func (s *Service) routes() http.Handler {
 	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assetFS))))
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/adopt", s.handleAdopt)
+	mux.HandleFunc("/auth/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/auth/login", s.handleLogin)
 	mux.HandleFunc("/auth/logout", s.handleLogout)
 	mux.HandleFunc("/auth/reset", s.handleReset)
@@ -606,9 +607,97 @@ func (s *Service) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *Service) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.Enabled() {
+		writeJSONError(w, http.StatusNotFound, "bootstrap unavailable when http auth is disabled")
+		return
+	}
+	if s.auth.Bootstrapped() {
+		if wantsHTML(r) {
+			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+			return
+		}
+		writeJSONError(w, http.StatusConflict, "node web auth already initialized")
+		return
+	}
+	if r.Method == http.MethodGet {
+		token, err := s.issueCSRFToken(w, r)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.renderBootstrapPage(w, http.StatusOK, token, "")
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if wantsHTML(r) {
+		if err := s.validateAnonymousCSRF(r); err != nil {
+			token, issueErr := s.issueCSRFToken(w, r)
+			if issueErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, issueErr.Error())
+				return
+			}
+			s.renderBootstrapPage(w, http.StatusForbidden, token, err.Error())
+			return
+		}
+	}
+	req, err := bootstrapRequestFromRequest(r)
+	if err != nil {
+		if wantsHTML(r) {
+			token, issueErr := s.issueCSRFToken(w, r)
+			if issueErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, issueErr.Error())
+				return
+			}
+			s.renderBootstrapPage(w, http.StatusBadRequest, token, err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.auth.Bootstrap(req.NewPassword, req.ConfirmPassword); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAlreadyBootstrapped) {
+			status = http.StatusConflict
+		}
+		if wantsHTML(r) {
+			token, issueErr := s.issueCSRFToken(w, r)
+			if issueErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, issueErr.Error())
+				return
+			}
+			s.renderBootstrapPage(w, status, token, err.Error())
+			return
+		}
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	if err := s.startSession(w, r, defaultAdminUsername); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if wantsHTML(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "bootstrapped"})
+}
+
 func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.Enabled() {
 		writeJSONError(w, http.StatusNotFound, "login unavailable when http auth is disabled")
+		return
+	}
+	if !s.auth.Bootstrapped() {
+		if wantsHTML(r) {
+			http.Redirect(w, r, "/auth/bootstrap", http.StatusSeeOther)
+			return
+		}
+		writeJSONError(w, http.StatusUnauthorized, "node web auth not initialized; complete setup at /auth/bootstrap")
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -774,9 +863,9 @@ func (s *Service) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildSettingsViewModel gathers everything the settings page needs to
-// render, including the current default-password warning state. It is
-// shared by handleSettings and handleChangePassword's error path so the
-// page can be re-rendered consistently after a failed password change.
+// render. It is shared by handleSettings and handleChangePassword's error
+// path so the page can be re-rendered consistently after a failed password
+// change.
 func (s *Service) buildSettingsViewModel(r *http.Request, username, message, errMessage string) (settingsViewModel, error) {
 	uiEnabled, err := s.auth.UIEnabled()
 	if err != nil {
@@ -791,13 +880,12 @@ func (s *Service) buildSettingsViewModel(r *http.Request, username, message, err
 		return settingsViewModel{}, err
 	}
 	return settingsViewModel{
-		Username:             username,
-		UIEnabled:            uiEnabled,
-		UIManaged:            uiManaged,
-		UsingDefaultPassword: s.auth.UsingDefaultPassword(),
-		Message:              message,
-		Error:                errMessage,
-		CSRFToken:            csrfToken,
+		Username:  username,
+		UIEnabled: uiEnabled,
+		UIManaged: uiManaged,
+		Message:   message,
+		Error:     errMessage,
+		CSRFToken: csrfToken,
 	}, nil
 }
 
@@ -1229,9 +1317,18 @@ func (s *Service) handleAPIUPS(w http.ResponseWriter, r *http.Request) {
 func (s *Service) renderLoginPage(w http.ResponseWriter, status int, csrfToken, message string, uiDisabled bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	viewModel := loginViewModel{Error: message, UIDisabled: uiDisabled, DefaultPasswordWarning: s.auth.UsingDefaultPassword(), CSRFToken: csrfToken}
+	viewModel := loginViewModel{Error: message, UIDisabled: uiDisabled, CSRFToken: csrfToken}
 	if err := loginTemplate.Execute(w, viewModel); err != nil && s.logger != nil {
 		s.logger.Printf("render login failed: %v", err)
+	}
+}
+
+func (s *Service) renderBootstrapPage(w http.ResponseWriter, status int, csrfToken, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	viewModel := bootstrapViewModel{Error: message, CSRFToken: csrfToken}
+	if err := bootstrapTemplate.Execute(w, viewModel); err != nil && s.logger != nil {
+		s.logger.Printf("render bootstrap failed: %v", err)
 	}
 }
 
@@ -1246,6 +1343,14 @@ func (s *Service) renderSettingsPage(w http.ResponseWriter, status int, viewMode
 func (s *Service) requireSession(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if !s.auth.Enabled() {
 		return "", true
+	}
+	if !s.auth.Bootstrapped() {
+		if wantsHTML(r) {
+			http.Redirect(w, r, "/auth/bootstrap", http.StatusSeeOther)
+		} else {
+			writeJSONError(w, http.StatusUnauthorized, "node web auth not initialized; complete setup at /auth/bootstrap")
+		}
+		return "", false
 	}
 	username, err := s.auth.SessionUsername(r)
 	if err != nil {
@@ -1347,13 +1452,14 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request, username 
 	if err != nil {
 		return err
 	}
+	secure := requestIsSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
+		Secure:   secure,
 		MaxAge:   int(defaultSessionTTL.Seconds()),
 	})
 	http.SetCookie(w, &http.Cookie{
@@ -1362,15 +1468,29 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request, username 
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
+		Secure:   secure,
 		MaxAge:   int(defaultSessionTTL.Seconds()),
 	})
 	return nil
 }
 
 func (s *Service) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: true, MaxAge: -1})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: true, MaxAge: -1})
+	secure := requestIsSecure(r)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure, MaxAge: -1})
+}
+
+// requestIsSecure reports whether the request should be treated as arriving
+// over a secure transport, so Secure cookies are only set when the browser
+// will actually persist them (plain HTTP deployments must still work).
+func requestIsSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 func (s *Service) buildStatusResponse(ctx context.Context) (statusResponse, error) {
@@ -2043,6 +2163,21 @@ func loginRequestFromRequest(r *http.Request) (loginRequest, error) {
 	return loginRequest{Username: r.FormValue("username"), Password: r.FormValue("password")}, nil
 }
 
+func bootstrapRequestFromRequest(r *http.Request) (bootstrapRequest, error) {
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(contentType, "application/json") {
+		var req bootstrapRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return bootstrapRequest{}, fmt.Errorf("decode bootstrap request: %w", err)
+		}
+		return req, nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return bootstrapRequest{}, fmt.Errorf("parse bootstrap form: %w", err)
+	}
+	return bootstrapRequest{NewPassword: r.FormValue("new_password"), ConfirmPassword: r.FormValue("confirm_password")}, nil
+}
+
 func enabledFlagFromRequest(r *http.Request) (bool, error) {
 	contentType := strings.ToLower(r.Header.Get("Content-Type"))
 	if strings.HasPrefix(contentType, "application/json") {
@@ -2104,7 +2239,7 @@ func (s *Service) issueCSRFToken(w http.ResponseWriter, r *http.Request) (string
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
+		Secure:   requestIsSecure(r),
 		MaxAge:   int(defaultSessionTTL.Seconds()),
 	})
 	return token, nil

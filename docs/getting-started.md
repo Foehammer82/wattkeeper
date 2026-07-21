@@ -1,110 +1,75 @@
 # Getting Started
 
-This guide covers the current supported path for trying Wattkeeper on a Raspberry Pi node.
-
 ## What You Need
 
 - a supported Raspberry Pi, preferably a Pi Zero 2 W
 - a microSD card
 - a USB UPS to attach to the node
 - network access for the Pi
-- Raspberry Pi Imager
-- either a downloaded release image or a locally built image artifact
+- [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
 
-## Supported Image Artifact
+## 1. Get The Image
 
-Wattkeeper currently ships a compressed Raspberry Pi disk image in `.img.xz` format. It is not an ISO.
+Download the `wattkeeper-node-<version>.img.xz` artifact from the [GitHub Releases page](https://github.com/Foehammer82/wattkeeper/releases) for Wattkeeper.
 
-If you build locally, the expected outputs are:
-
-- `dist/wattkeeper-node-<version>.img.xz`
-- `dist/wattkeeper-node-<version>.img.xz.sha256`
-
-## Option 1: Download A Release Image
-
-1. Open the GitHub Releases page for Wattkeeper.
-2. Download the `wattkeeper-node-<version>.img.xz` artifact.
-3. Download the matching `.sha256` file if you want to verify the image before flashing.
-
-## Option 2: Build The Image Locally
-
-From the repo root:
+Prefer to build it yourself instead? From the repo root:
 
 ```sh
 uv run wk image node --version v0.1.0-rc1
 ```
 
-When the build completes, verify that the `.img.xz` and `.sha256` files exist in `dist/`.
+This produces `dist/wattkeeper-node-<version>.img.xz` and a `.sha256` file you can verify with `sha256sum -c`.
 
-## Verify The Checksum
+## 2. Flash The SD Card
 
-Optional but recommended:
-
-```sh
-cd dist
-sha256sum -c wattkeeper-node-v0.1.0-rc1.img.xz.sha256
-```
-
-You should see `OK`.
-
-## Flash The SD Card
-
-!!! info "Need Raspberry Pi Imager?"
-    Download it from [raspberrypi.com/software/](https://www.raspberrypi.com/software/).
-
-1. Open Raspberry Pi Imager.
-2. Choose `Use custom`.
-3. Select `wattkeeper-node-<version>.img.xz`.
-4. Select the target SD card.
-5. Open the Imager customization dialog.
-6. Configure:
+1. Open Raspberry Pi Imager and choose `Use custom`.
+2. Select the `.img.xz` file (do not unpack it first) and your SD card.
+3. Open the customization dialog and set:
     - WiFi SSID, password, and country
-    - optionally enable SSH with at least one public key
-    - if you enable SSH, use key-based authentication for the `wattkeeper` user
-7. Write the image to the SD card.
+    - optionally, SSH with a public key for the `wattkeeper` user
+4. Write the image.
 
-Raspberry Pi Imager can write the compressed `.img.xz` directly. Do not unpack it first unless you have a separate reason to do that.
+## 3. Boot And Connect
 
-## First Boot
+1. Insert the SD card, power on the Pi, and let first boot finish (it may reboot once more automatically).
+2. Attach the UPS over USB.
+3. Once the node is on your network, open `http://<pi-ip>/` in a browser.
 
-1. Insert the SD card into the Pi.
-2. Boot the Pi and allow first boot to finish.
-3. Attach the UPS over USB.
-4. Wait for the node to settle on the network.
+The hostname defaults to `wkeeper-node-<last4 serial>`.
 
-Expected first-boot behavior:
+## 4. Set The Admin Password
 
-- the filesystem expands
-- there is no username or password creation prompt
-- the hostname becomes `wkeeper-node-<last4 serial>`
-- `/var/lib/wattkeeper` is created
-- OverlayFS is enabled by default for a read-mostly root filesystem
-- the agent starts automatically
-
-The OverlayFS switch can cause one additional reboot during initial setup. If you need writable-root behavior, place a `wattkeeper-overlayfs-disable` file on the boot partition before first boot.
-
-The first browser visit to `http://<pi-ip>/` initializes node-local web access by prompting for a local admin username and password. This is separate from SSH access. After bootstrap, the browser signs in through a session-based flow for the dashboard and detailed status pages.
-
-If you enabled SSH in Raspberry Pi Imager, connect as `wattkeeper` with your injected public key.
+The first time you open the node, you're prompted to set a password for the single local `admin` account. There is no built-in default password — you choose one during this first-run step, then sign in with it going forward.
 
 ## Validate The Node
 
-After boot:
-
-- verify the node is reachable on your LAN
-- verify `http://<pi-ip>/` prompts for first-run bootstrap or loads the authenticated node dashboard
-- verify `curl http://<pi-ip>/status` returns the minimal public node status payload
-- verify `http://<pi-ip>/settings` is available after sign-in for logout, auth reset, and the local UI toggle
-- verify `curl http://<pi-ip>/status/details` returns the richer local status payload when authenticated through the browser session or other future trusted client flow
-- verify `_wattkeeper._tcp` is advertised
-- verify the UPS appears through NUT from another machine with `upsc <ups-name>@<pi-ip>`
-- optionally verify read-mostly mode with `findmnt -n -o FSTYPE /` returning `overlay`
+- `http://<pi-ip>/` prompts to set the admin password on first visit, then loads the sign-in page and dashboard after signing in
+- `http://<pi-ip>/status` returns the minimal public node status payload
+- `avahi-browse -rt _wattkeeper._tcp` (run from another Linux machine) shows the node advertised over mDNS
+- `upsc <ups-name>@<pi-ip>` (run from another machine) shows the attached UPS through NUT
 
 ## What Comes Next
 
-Today, Wattkeeper is no longer node-only. After validating the node image, you can run the controller to discover and adopt nodes, review fleet telemetry, and manage alerts through the controller GUI.
+Wattkeeper also has a controller for discovering and adopting nodes, reviewing fleet telemetry, and managing alerts across multiple nodes. The controller is a regular Linux service, not tied to Pi hardware, so pick whichever install method fits:
 
-For local controller development from the repo root:
+### Run With Docker
+
+```sh
+docker run -d --name wattkeeper-controller \
+  -p 9000:9000 \
+  -v wattkeeper-controller-data:/data \
+  ghcr.io/foehammer82/wattkeeper-controller:latest
+```
+
+Or use the compose file included in the repo, which builds the image from source instead of pulling it:
+
+```sh
+docker compose -f deploy/docker-compose.controller.yml up -d --build
+```
+
+### Build From Source
+
+From the repo root:
 
 ```sh
 uv run wk build controller-web

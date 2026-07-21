@@ -526,7 +526,7 @@ func TestIndexReturnsNotFoundForUnknownPaths(t *testing.T) {
 	}
 }
 
-func TestIndexRendersLoginWithDefaultPasswordWarning(t *testing.T) {
+func TestIndexRedirectsToBootstrapOnFreshNode(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -537,14 +537,105 @@ func TestIndexRendersLoginWithDefaultPasswordWarning(t *testing.T) {
 
 	service.Handler().ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusSeeOther)
 	}
-	body := recorder.Body.String()
-	for _, want := range []string{"Sign In", "default admin password", "AGENT_ADMIN_PASSWORD", "/status"} {
+	if location := recorder.Header().Get("Location"); location != "/auth/bootstrap" {
+		t.Fatalf("location = %q, want %q", location, "/auth/bootstrap")
+	}
+
+	bootstrapPage := httptest.NewRequest(http.MethodGet, "/auth/bootstrap", nil)
+	bootstrapPage.Header.Set("Accept", "text/html")
+	bootstrapPageRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(bootstrapPageRecorder, bootstrapPage)
+	if bootstrapPageRecorder.Code != http.StatusOK {
+		t.Fatalf("bootstrap page status = %d, want %d", bootstrapPageRecorder.Code, http.StatusOK)
+	}
+	body := bootstrapPageRecorder.Body.String()
+	for _, want := range []string{"Set Admin Password", "admin"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q: %s", want, body)
 		}
+	}
+}
+
+func TestBootstrapCreatesAdminAccountAndSession(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
+
+	cookies := loginAsDefaultAdmin(t, service)
+	sessionCookie := cookieByName(cookies, sessionCookieName)
+	if sessionCookie == nil {
+		t.Fatal("expected bootstrap to issue a session cookie")
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.AddCookie(sessionCookie)
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	// Bootstrapping again must fail now that the account exists.
+	replay := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(`{"new_password":"`+testAdminPassword+`","confirm_password":"`+testAdminPassword+`"}`))
+	replay.Header.Set("Content-Type", "application/json")
+	replayRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(replayRecorder, replay)
+	if replayRecorder.Code != http.StatusConflict {
+		t.Fatalf("re-bootstrap status = %d, want %d body=%s", replayRecorder.Code, http.StatusConflict, replayRecorder.Body.String())
+	}
+}
+
+func TestBootstrapRejectsMismatchedPasswords(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
+
+	mismatch := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(`{"new_password":"`+testAdminPassword+`","confirm_password":"something-else"}`))
+	mismatch.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, mismatch)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched bootstrap status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestBootstrapHTMLFormRequiresCSRFToken(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
+
+	form := "new_password=" + testAdminPassword + "&confirm_password=" + testAdminPassword
+	missingToken := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(form))
+	missingToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	missingToken.Header.Set("Accept", "text/html")
+	missingTokenRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(missingTokenRecorder, missingToken)
+	if missingTokenRecorder.Code != http.StatusForbidden {
+		t.Fatalf("bootstrap form without csrf status = %d, want %d body=%s", missingTokenRecorder.Code, http.StatusForbidden, missingTokenRecorder.Body.String())
+	}
+
+	bootstrapPage := httptest.NewRequest(http.MethodGet, "/auth/bootstrap", nil)
+	bootstrapPageRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(bootstrapPageRecorder, bootstrapPage)
+	csrfCookie := cookieByName(bootstrapPageRecorder.Result().Cookies(), csrfCookieName)
+	if csrfCookie == nil {
+		t.Fatal("expected bootstrap page csrf cookie")
+	}
+
+	withToken := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(form+"&csrf_token="+csrfCookie.Value))
+	withToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	withToken.Header.Set("Accept", "text/html")
+	withToken.AddCookie(csrfCookie)
+	withTokenRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(withTokenRecorder, withToken)
+	if withTokenRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("bootstrap form with csrf status = %d, want %d body=%s", withTokenRecorder.Code, http.StatusSeeOther, withTokenRecorder.Body.String())
 	}
 }
 
@@ -561,7 +652,7 @@ func TestChangePasswordRequiresCSRFToken(t *testing.T) {
 		t.Fatalf("expected session and csrf cookies, got session=%v csrf=%v", sessionCookie != nil, csrfCookie != nil)
 	}
 
-	form := "current_password=" + fallbackAdminPassword + "&new_password=another-strong-pass&confirm_password=another-strong-pass"
+	form := "current_password=" + testAdminPassword + "&new_password=another-strong-pass&confirm_password=another-strong-pass"
 
 	missingToken := httptest.NewRequest(http.MethodPost, "/settings/password", strings.NewReader(form))
 	missingToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -608,7 +699,7 @@ func TestSessionProtectsDetailedRoutes(t *testing.T) {
 	beforeLoginRecorder := httptest.NewRecorder()
 	service.Handler().ServeHTTP(beforeLoginRecorder, beforeLogin)
 	if beforeLoginRecorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status before login = %d, want %d", beforeLoginRecorder.Code, http.StatusUnauthorized)
+		t.Fatalf("status before bootstrap = %d, want %d", beforeLoginRecorder.Code, http.StatusUnauthorized)
 	}
 
 	cookies := loginAsDefaultAdmin(t, service)
@@ -693,7 +784,7 @@ func TestLoginRotatesExistingSessionToken(t *testing.T) {
 		t.Fatal("expected initial login to issue a session cookie")
 	}
 
-	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+fallbackAdminPassword+`"}`))
+	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+testAdminPassword+`"}`))
 	login.Header.Set("Content-Type", "application/json")
 	login.AddCookie(originalSession)
 	loginRecorder := httptest.NewRecorder()
@@ -732,6 +823,15 @@ func TestAuthCookiesUseSecureAttributeForTLSRequests(t *testing.T) {
 	tempDir := t.TempDir()
 	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
 
+	bootstrap := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(`{"new_password":"`+testAdminPassword+`","confirm_password":"`+testAdminPassword+`"}`))
+	bootstrap.Header.Set("Content-Type", "application/json")
+	bootstrap.TLS = &tls.ConnectionState{}
+	bootstrapRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(bootstrapRecorder, bootstrap)
+	if bootstrapRecorder.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want %d body=%s", bootstrapRecorder.Code, http.StatusOK, bootstrapRecorder.Body.String())
+	}
+
 	loginPage := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
 	loginPage.TLS = &tls.ConnectionState{}
 	loginPageRecorder := httptest.NewRecorder()
@@ -747,7 +847,7 @@ func TestAuthCookiesUseSecureAttributeForTLSRequests(t *testing.T) {
 		t.Fatal("expected login page csrf cookie to be Secure over TLS")
 	}
 
-	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+fallbackAdminPassword+`"}`))
+	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+testAdminPassword+`"}`))
 	login.Header.Set("Content-Type", "application/json")
 	login.TLS = &tls.ConnectionState{}
 	loginRecorder := httptest.NewRecorder()
@@ -762,6 +862,51 @@ func TestAuthCookiesUseSecureAttributeForTLSRequests(t *testing.T) {
 	}
 	if !sessionCookie.Secure || !csrfCookie.Secure {
 		t.Fatalf("expected Secure cookies for TLS login, got session=%t csrf=%t", sessionCookie.Secure, csrfCookie.Secure)
+	}
+}
+
+func TestAuthCookiesOmitSecureAttributeOverPlainHTTP(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	service := New(nil, Options{RootPath: tempDir, AuthPath: filepath.Join(tempDir, "webui-auth.json")})
+
+	bootstrap := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(`{"new_password":"`+testAdminPassword+`","confirm_password":"`+testAdminPassword+`"}`))
+	bootstrap.Header.Set("Content-Type", "application/json")
+	bootstrapRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(bootstrapRecorder, bootstrap)
+	if bootstrapRecorder.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want %d body=%s", bootstrapRecorder.Code, http.StatusOK, bootstrapRecorder.Body.String())
+	}
+
+	loginPage := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	loginPageRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(loginPageRecorder, loginPage)
+	if loginPageRecorder.Code != http.StatusOK {
+		t.Fatalf("login page status = %d, want %d", loginPageRecorder.Code, http.StatusOK)
+	}
+	loginPageCSRFCookie := cookieByName(loginPageRecorder.Result().Cookies(), csrfCookieName)
+	if loginPageCSRFCookie == nil {
+		t.Fatal("expected login page csrf cookie")
+	}
+	if loginPageCSRFCookie.Secure {
+		t.Fatal("expected login page csrf cookie to omit Secure over plain HTTP")
+	}
+
+	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+testAdminPassword+`"}`))
+	login.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d body=%s", loginRecorder.Code, http.StatusOK, loginRecorder.Body.String())
+	}
+	sessionCookie := cookieByName(loginRecorder.Result().Cookies(), sessionCookieName)
+	csrfCookie := cookieByName(loginRecorder.Result().Cookies(), csrfCookieName)
+	if sessionCookie == nil || csrfCookie == nil {
+		t.Fatalf("expected session and csrf cookies, got session=%v csrf=%v", sessionCookie != nil, csrfCookie != nil)
+	}
+	if sessionCookie.Secure || csrfCookie.Secure {
+		t.Fatalf("expected non-Secure cookies for plain HTTP login, got session=%t csrf=%t", sessionCookie.Secure, csrfCookie.Secure)
 	}
 }
 
@@ -817,16 +962,16 @@ func TestSettingsCanToggleLocalUIAndResetAuth(t *testing.T) {
 	afterReset.Header.Set("Accept", "text/html")
 	afterResetRecorder := httptest.NewRecorder()
 	service.Handler().ServeHTTP(afterResetRecorder, afterReset)
-	if afterResetRecorder.Code != http.StatusUnauthorized {
-		t.Fatalf("after reset status = %d, want %d", afterResetRecorder.Code, http.StatusUnauthorized)
+	if afterResetRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("after reset status = %d, want %d", afterResetRecorder.Code, http.StatusSeeOther)
 	}
-	if !strings.Contains(afterResetRecorder.Body.String(), "Sign In") {
-		t.Fatalf("after reset body missing login page: %s", afterResetRecorder.Body.String())
+	if location := afterResetRecorder.Header().Get("Location"); location != "/auth/bootstrap" {
+		t.Fatalf("after reset location = %q, want %q", location, "/auth/bootstrap")
 	}
 
 	reLoginCookies := loginAsDefaultAdmin(t, service)
 	if cookieByName(reLoginCookies, sessionCookieName) == nil {
-		t.Fatal("expected default admin credentials to work again after reset")
+		t.Fatal("expected admin bootstrap to work again after reset")
 	}
 }
 
@@ -1059,21 +1204,25 @@ func cookieByName(cookies []*http.Cookie, name string) *http.Cookie {
 	return nil
 }
 
-// loginAsDefaultAdmin signs in with the auto-provisioned default admin
-// account (using the built-in fallback password, since tests do not set
-// AGENT_ADMIN_PASSWORD) and returns the resulting cookies.
+// testAdminPassword is the password used to bootstrap the local admin
+// account in tests. There is no built-in default password; the first
+// browser client to reach a fresh node must set one via /auth/bootstrap.
+const testAdminPassword = "wattkeeper-test-admin-pass"
+
+// loginAsDefaultAdmin bootstraps the local admin account with
+// testAdminPassword and returns the resulting session cookies.
 func loginAsDefaultAdmin(t *testing.T, service *Service) []*http.Cookie {
 	t.Helper()
-	login := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+defaultAdminUsername+`","password":"`+fallbackAdminPassword+`"}`))
-	login.Header.Set("Content-Type", "application/json")
+	bootstrap := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", strings.NewReader(`{"new_password":"`+testAdminPassword+`","confirm_password":"`+testAdminPassword+`"}`))
+	bootstrap.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	service.Handler().ServeHTTP(recorder, login)
+	service.Handler().ServeHTTP(recorder, bootstrap)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("login status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf("bootstrap status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	cookies := recorder.Result().Cookies()
 	if len(cookies) == 0 {
-		t.Fatal("expected login to issue cookies")
+		t.Fatal("expected bootstrap to issue cookies")
 	}
 	return cookies
 }
