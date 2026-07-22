@@ -38,6 +38,14 @@ func TestHealthzReturnsAgentMetricsAndUPSStatus(t *testing.T) {
 	if err := os.WriteFile(tempPath, []byte("42125\n"), 0o600); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}
+	memInfoPath := filepath.Join(tempDir, "meminfo")
+	if err := os.WriteFile(memInfoPath, []byte("MemTotal:        2048000 kB\nMemFree:          512000 kB\nMemAvailable:    1024000 kB\n"), 0o600); err != nil {
+		t.Fatalf("write meminfo file: %v", err)
+	}
+	cpuStatPath := filepath.Join(tempDir, "stat")
+	if err := os.WriteFile(cpuStatPath, []byte("cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 100 0 100 800 0 0 0 0 0 0\n"), 0o600); err != nil {
+		t.Fatalf("write stat file: %v", err)
+	}
 
 	service := New(nil, Options{
 		Version:     "1.2.3",
@@ -45,6 +53,8 @@ func TestHealthzReturnsAgentMetricsAndUPSStatus(t *testing.T) {
 		StartedAt:   time.Now().Add(-2 * time.Minute),
 		Runner:      fakeRunner{outputs: map[string]commandResult{"upsc ups-a": {output: []byte("ups.status: OL\n")}, "upsc ups-b": {output: []byte("Error: Driver not connected\n"), err: errors.New("exit status 1")}}},
 		CPUTempPath: tempPath,
+		MemInfoPath: memInfoPath,
+		CPUStatPath: cpuStatPath,
 		RootPath:    tempDir,
 		DisableAuth: true,
 	})
@@ -75,6 +85,17 @@ func TestHealthzReturnsAgentMetricsAndUPSStatus(t *testing.T) {
 	if response.CPUTemperatureCelsius == nil || *response.CPUTemperatureCelsius != 42.125 {
 		t.Fatalf("CPUTemperatureCelsius = %v, want %v", response.CPUTemperatureCelsius, 42.125)
 	}
+	if response.CPUUsagePercent != nil {
+		t.Fatalf("CPUUsagePercent = %v, want nil on first sample", *response.CPUUsagePercent)
+	}
+	wantTotal := uint64(2048000) * 1024
+	wantUsed := uint64(2048000-1024000) * 1024
+	if response.MemoryTotalBytes != wantTotal {
+		t.Fatalf("MemoryTotalBytes = %d, want %d", response.MemoryTotalBytes, wantTotal)
+	}
+	if response.MemoryUsedBytes != wantUsed {
+		t.Fatalf("MemoryUsedBytes = %d, want %d", response.MemoryUsedBytes, wantUsed)
+	}
 	if response.DiskFreeBytes == 0 {
 		t.Fatal("DiskFreeBytes = 0, want non-zero")
 	}
@@ -86,6 +107,21 @@ func TestHealthzReturnsAgentMetricsAndUPSStatus(t *testing.T) {
 	}
 	if response.UPSes[1].Name != "ups-b" || response.UPSes[1].Status != startingStatus {
 		t.Fatalf("second UPS = %#v, want name/status ups-b/%s", response.UPSes[1], startingStatus)
+	}
+
+	// A second sample with advanced cumulative jiffy counters lets
+	// cpuUsagePercent compute a delta-based percentage.
+	if err := os.WriteFile(cpuStatPath, []byte("cpu  200 0 200 1600 0 0 0 0 0 0\n"), 0o600); err != nil {
+		t.Fatalf("update stat file: %v", err)
+	}
+	recorder2 := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder2, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var response2 healthResponse
+	if err := json.Unmarshal(recorder2.Body.Bytes(), &response2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if response2.CPUUsagePercent == nil || *response2.CPUUsagePercent != 20 {
+		t.Fatalf("CPUUsagePercent = %v, want 20", response2.CPUUsagePercent)
 	}
 }
 
@@ -1627,6 +1663,139 @@ func TestParseUPSStatusAcceptsColonAndEquals(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("parseUPSStatus() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadMemoryUsage(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		content   string
+		wantUsed  uint64
+		wantTotal uint64
+		wantErr   bool
+	}{
+		{
+			name:      "realistic meminfo",
+			content:   "MemTotal:        2048000 kB\nMemFree:          400000 kB\nBuffers:           50000 kB\nCached:           600000 kB\nMemAvailable:    1024000 kB\n",
+			wantUsed:  (2048000 - 1024000) * 1024,
+			wantTotal: 2048000 * 1024,
+		},
+		{
+			name:      "fields in reverse order",
+			content:   "MemAvailable:     500000 kB\nMemTotal:        1000000 kB\n",
+			wantUsed:  (1000000 - 500000) * 1024,
+			wantTotal: 1000000 * 1024,
+		},
+		{
+			name:      "MemAvailable exceeding MemTotal is clamped",
+			content:   "MemTotal:         100000 kB\nMemAvailable:     150000 kB\n",
+			wantUsed:  0,
+			wantTotal: 100000 * 1024,
+		},
+		{
+			name:    "missing MemAvailable",
+			content: "MemTotal:        2048000 kB\n",
+			wantErr: true,
+		},
+		{
+			name:    "missing MemTotal",
+			content: "MemAvailable:    1024000 kB\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty content",
+			content: "",
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "meminfo")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write meminfo fixture: %v", err)
+			}
+
+			used, total, err := readMemoryUsage(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("readMemoryUsage() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readMemoryUsage() error = %v", err)
+			}
+			if used != tc.wantUsed {
+				t.Fatalf("readMemoryUsage() used = %d, want %d", used, tc.wantUsed)
+			}
+			if total != tc.wantTotal {
+				t.Fatalf("readMemoryUsage() total = %d, want %d", total, tc.wantTotal)
+			}
+		})
+	}
+}
+
+func TestReadCPUStatTotals(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		content   string
+		wantIdle  uint64
+		wantTotal uint64
+		wantErr   bool
+	}{
+		{
+			name:      "realistic proc stat with per-core lines",
+			content:   "cpu  100 0 200 700 10 0 0 0 0 0\ncpu0 50 0 100 350 5 0 0 0 0 0\ncpu1 50 0 100 350 5 0 0 0 0 0\n",
+			wantIdle:  700 + 10,
+			wantTotal: 100 + 200 + 700 + 10,
+		},
+		{
+			name:      "no iowait field",
+			content:   "cpu 100 0 200 700\n",
+			wantIdle:  700,
+			wantTotal: 1000,
+		},
+		{
+			name:    "missing cpu line",
+			content: "cpu0 100 0 200 700\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty content",
+			content: "",
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "stat")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write stat fixture: %v", err)
+			}
+
+			idle, total, err := readCPUStatTotals(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("readCPUStatTotals() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readCPUStatTotals() error = %v", err)
+			}
+			if idle != tc.wantIdle {
+				t.Fatalf("readCPUStatTotals() idle = %d, want %d", idle, tc.wantIdle)
+			}
+			if total != tc.wantTotal {
+				t.Fatalf("readCPUStatTotals() total = %d, want %d", total, tc.wantTotal)
 			}
 		})
 	}

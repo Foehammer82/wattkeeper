@@ -42,6 +42,8 @@ type Options struct {
 	UPSCmdPath     string
 	UPSRWPath      string
 	CPUTempPath    string
+	MemInfoPath    string
+	CPUStatPath    string
 	RootPath       string
 	AdoptionPath   string
 	DisableAuth    bool
@@ -63,6 +65,8 @@ func New(logger *log.Logger, opts Options) *Service {
 		UPSCmdPath:     opts.UPSCmdPath,
 		UPSRWPath:      opts.UPSRWPath,
 		CPUTempPath:    opts.CPUTempPath,
+		MemInfoPath:    opts.MemInfoPath,
+		CPUStatPath:    opts.CPUStatPath,
 		RootPath:       opts.RootPath,
 		AdoptionPath:   opts.AdoptionPath,
 		DisableAuth:    opts.DisableAuth,

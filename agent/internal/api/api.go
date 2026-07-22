@@ -37,6 +37,8 @@ import (
 
 const (
 	defaultCPUTempPath = "/sys/class/thermal/thermal_zone0/temp"
+	defaultMemInfoPath = "/proc/meminfo"
+	defaultCPUStatPath = "/proc/stat"
 	defaultRootPath    = "/"
 	defaultUPSCPath    = "upsc"
 	csrfCookieName     = "strom_csrf"
@@ -66,6 +68,8 @@ type Options struct {
 	UPSCmdPath      string
 	UPSRWPath       string
 	CPUTempPath     string
+	MemInfoPath     string
+	CPUStatPath     string
 	RootPath        string
 	AdoptionPath    string
 	DisableAuth     bool
@@ -97,6 +101,8 @@ type Service struct {
 	upscmdPath      string
 	upsrwPath       string
 	cpuTempPath     string
+	memInfoPath     string
+	cpuStatPath     string
 	rootPath        string
 	adoptionPath    string
 	upsMetadataPath string
@@ -108,10 +114,19 @@ type Service struct {
 	adopter         adoptionHandler
 	sshAccess       sshAccessManager
 
-	mu          sync.RWMutex
-	devices     []nutconf.DetectedUPS
-	upsMetadata map[string]upsMetadata
-	cache       http.Handler
+	mu            sync.RWMutex
+	devices       []nutconf.DetectedUPS
+	upsMetadata   map[string]upsMetadata
+	cache         http.Handler
+	lastCPUSample cpuStatSample
+}
+
+// cpuStatSample is a single reading of cumulative CPU jiffy counters (from
+// /proc/stat), used to compute CPU usage as a percentage over the interval
+// between two health requests.
+type cpuStatSample struct {
+	idle  uint64
+	total uint64
 }
 
 type healthResponse struct {
@@ -119,6 +134,9 @@ type healthResponse struct {
 	UptimeSeconds         int64       `json:"uptime_seconds"`
 	Serial                string      `json:"serial"`
 	CPUTemperatureCelsius *float64    `json:"cpu_temperature_celsius,omitempty"`
+	CPUUsagePercent       *float64    `json:"cpu_usage_percent,omitempty"`
+	MemoryUsedBytes       uint64      `json:"memory_used_bytes"`
+	MemoryTotalBytes      uint64      `json:"memory_total_bytes"`
 	DiskFreeBytes         uint64      `json:"disk_free_bytes"`
 	UPSes                 []upsHealth `json:"upses"`
 }
@@ -347,6 +365,12 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 		}
 		return fmt.Sprintf("%.1f C", *value)
 	},
+	"formatPercent": func(value *float64) string {
+		if value == nil {
+			return "unavailable"
+		}
+		return fmt.Sprintf("%.1f%%", *value)
+	},
 	"initials": func(name string) string {
 		trimmed := strings.TrimSpace(name)
 		if trimmed == "" {
@@ -445,6 +469,8 @@ var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{
 				<article class="metric-card"><span class="eyebrow">Uptime</span><div class="metric-value">{{.Health.UptimeSeconds}}s</div></article>
 				<article class="metric-card"><span class="eyebrow">Disk free</span><div class="metric-value">{{.Health.DiskFreeBytes}} B</div></article>
 				<article class="metric-card"><span class="eyebrow">CPU temp</span><div class="metric-value">{{formatTemp .Health.CPUTemperatureCelsius}}</div></article>
+				<article class="metric-card"><span class="eyebrow">CPU usage</span><div class="metric-value">{{formatPercent .Health.CPUUsagePercent}}</div></article>
+				<article class="metric-card"><span class="eyebrow">Memory used</span><div class="metric-value">{{.Health.MemoryUsedBytes}} / {{.Health.MemoryTotalBytes}} B</div></article>
 				<article class="metric-card"><span class="eyebrow">UPS count</span><div class="metric-value">{{len .Health.UPSes}}</div></article>
 			</div>
 		</section>
@@ -660,6 +686,16 @@ func New(logger *log.Logger, opts Options) *Service {
 		cpuTempPath = defaultCPUTempPath
 	}
 
+	memInfoPath := opts.MemInfoPath
+	if memInfoPath == "" {
+		memInfoPath = defaultMemInfoPath
+	}
+
+	cpuStatPath := opts.CPUStatPath
+	if cpuStatPath == "" {
+		cpuStatPath = defaultCPUStatPath
+	}
+
 	rootPath := opts.RootPath
 	if rootPath == "" {
 		rootPath = defaultRootPath
@@ -675,6 +711,8 @@ func New(logger *log.Logger, opts Options) *Service {
 		upscmdPath:      upscmdPath,
 		upsrwPath:       upsrwPath,
 		cpuTempPath:     cpuTempPath,
+		memInfoPath:     memInfoPath,
+		cpuStatPath:     cpuStatPath,
 		rootPath:        rootPath,
 		adoptionPath:    opts.AdoptionPath,
 		upsMetadataPath: opts.UPSMetadataPath,
@@ -2212,6 +2250,21 @@ func (s *Service) buildHealthResponse(ctx context.Context) (healthResponse, erro
 		s.logger.Printf("health cpu temperature unavailable: %v", err)
 	}
 
+	if cpuUsage, err := s.cpuUsagePercent(); err != nil {
+		if s.logger != nil {
+			s.logger.Printf("health cpu usage unavailable: %v", err)
+		}
+	} else {
+		response.CPUUsagePercent = cpuUsage
+	}
+
+	if usedBytes, totalBytes, err := readMemoryUsage(s.memInfoPath); err == nil {
+		response.MemoryUsedBytes = usedBytes
+		response.MemoryTotalBytes = totalBytes
+	} else if s.logger != nil {
+		s.logger.Printf("health memory usage unavailable: %v", err)
+	}
+
 	diskFree, err := diskFreeBytes(s.rootPath)
 	if err != nil {
 		return healthResponse{}, fmt.Errorf("stat root filesystem: %w", err)
@@ -2586,6 +2639,122 @@ func diskFreeBytes(path string) (uint64, error) {
 		return 0, err
 	}
 	return stat.Bavail * uint64(stat.Bsize), nil
+}
+
+// readMemoryUsage parses /proc/meminfo-format content and returns the
+// currently used and total memory in bytes. "Used" is derived as
+// total-available (MemAvailable already accounts for reclaimable caches,
+// unlike the naive total-free calculation).
+func readMemoryUsage(path string) (usedBytes, totalBytes uint64, err error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var total, available uint64
+	var foundTotal, foundAvailable bool
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		switch strings.TrimSuffix(fields[0], ":") {
+		case "MemTotal":
+			total, err = strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0, 0, fmt.Errorf("parse MemTotal in %s: %w", path, err)
+			}
+			total *= 1024
+			foundTotal = true
+		case "MemAvailable":
+			available, err = strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0, 0, fmt.Errorf("parse MemAvailable in %s: %w", path, err)
+			}
+			available *= 1024
+			foundAvailable = true
+		}
+
+		if foundTotal && foundAvailable {
+			break
+		}
+	}
+
+	if !foundTotal || !foundAvailable {
+		return 0, 0, fmt.Errorf("MemTotal/MemAvailable not found in %s", path)
+	}
+	if available > total {
+		available = total
+	}
+	return total - available, total, nil
+}
+
+// readCPUStatTotals parses the aggregate "cpu" line of /proc/stat-format
+// content, returning cumulative idle and total jiffy counters since boot.
+func readCPUStatTotals(path string) (idle, total uint64, err error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+
+		values := make([]uint64, 0, len(fields)-1)
+		for _, field := range fields[1:] {
+			value, parseErr := strconv.ParseUint(field, 10, 64)
+			if parseErr != nil {
+				return 0, 0, fmt.Errorf("parse %s field %q: %w", path, field, parseErr)
+			}
+			values = append(values, value)
+		}
+
+		for _, value := range values {
+			total += value
+		}
+		// fields: user nice system idle iowait ... - idle time is the sum
+		// of "idle" and "iowait" (both count as CPU not doing work).
+		idle = values[3]
+		if len(values) > 4 {
+			idle += values[4]
+		}
+		return idle, total, nil
+	}
+
+	return 0, 0, fmt.Errorf("cpu totals not found in %s", path)
+}
+
+// cpuUsagePercent computes CPU utilization as a percentage of the interval
+// since the previous call, using cumulative jiffy counters from
+// s.cpuStatPath. The first call after startup has no prior sample to diff
+// against, so it returns (nil, nil) rather than an error.
+func (s *Service) cpuUsagePercent() (*float64, error) {
+	idle, total, err := readCPUStatTotals(s.cpuStatPath)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	previous := s.lastCPUSample
+	s.lastCPUSample = cpuStatSample{idle: idle, total: total}
+	s.mu.Unlock()
+
+	if previous.total == 0 || total <= previous.total {
+		return nil, nil
+	}
+
+	totalDelta := total - previous.total
+	idleDelta := idle - previous.idle
+	if idleDelta > totalDelta {
+		idleDelta = totalDelta
+	}
+
+	usage := float64(totalDelta-idleDelta) / float64(totalDelta) * 100.0
+	return &usage, nil
 }
 
 func parseUPSStatus(output []byte) (string, error) {

@@ -433,6 +433,8 @@ function renderHealth() {
     ["Uptime", formatDuration(state.health.uptime_seconds)],
     ["Disk free", formatBytes(state.health.disk_free_bytes)],
     ["CPU temp", state.health.cpu_temperature_celsius == null ? "unavailable" : `${state.health.cpu_temperature_celsius.toFixed(1)} C`],
+    ["CPU usage", state.health.cpu_usage_percent == null ? "unavailable" : `${state.health.cpu_usage_percent.toFixed(1)}%`],
+    ["Memory used", `${formatBytes(state.health.memory_used_bytes)} / ${formatBytes(state.health.memory_total_bytes)}`],
     ["UPS count", String(state.health.upses.length)],
   ];
   els.metrics.innerHTML = cards.map(([label, value]) => `
