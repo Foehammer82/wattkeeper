@@ -48,3 +48,13 @@ Two supported paths:
 - Boot-partition reset: create `strom-factory-reset` in `/boot/firmware/` (or `/boot/` on older layouts) and boot once.
 
 Both paths clear adoption and controller TLS state. The boot-partition marker path also clears local web auth and persisted UPS naming state so the node returns to first-run bootstrap and pending adoption.
+
+## Can I power multiple UPS devices from one node through a USB hub?
+
+Yes, but use a self/externally powered hub, not a bus-powered one. A
+bus-powered hub feeding several UPS devices can draw more current than the
+Pi's USB port can reliably supply, and a marginal power budget can brown out
+after hours of otherwise normal operation, which looks identical to a crash
+that never recovers. If a node repeatedly disappears from the network after
+running fine for a while, check power delivery to the hub before assuming a
+software bug.

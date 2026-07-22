@@ -11,5 +11,6 @@ if ! grep -q '^# strom power tuning$' "$BOOT_CONFIG"; then
 # strom power tuning
 dtoverlay=disable-bt
 hdmi_ignore_hotplug=1
+dtparam=watchdog=on
 EOF
 fi

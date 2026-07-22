@@ -256,6 +256,14 @@ automatically with correct device grouping, controls work.
       `/var/lib/strom` before enabling Raspberry Pi's RAM-backed OverlayFS,
       keeping credentials and controller trust material durable across reboot.
 - [x] Multi-UPS-per-node support verification (USB hub on a 3A+ etc.)
+- [x] RAM/OOM hang protection for the RAM-backed OverlayFS root: hardware
+      watchdog (`dtparam=watchdog=on` + `RuntimeWatchdogSec`), capped volatile
+      journald storage, `zram-tools` compressed swap headroom, and
+      unconditional `strom-agent.service` restart (`StartLimitIntervalSec=0`)
+      so a node that hangs after hours of uptime auto-recovers instead of
+      staying dark; applied via the image build and `deploy/install.sh` for
+      manual retrofits, since the agent OTA mechanism only updates the agent
+      binary.
 
 **Implementation status**: Phase 5 is complete. The remaining product work
 starts with a fully capable single-node deployment, then carries those proven

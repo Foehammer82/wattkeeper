@@ -73,6 +73,32 @@ sudo reboot
 
 After the reboot, confirm `findmnt -n -o FSTYPE /` does not report `overlay`. Set the local admin password again afterward. If the node had been adopted before the power loss, re-adopt it because its on-node controller trust material may also have been lost.
 
+### RAM/OOM hang protection
+
+Because OverlayFS keeps ordinary root filesystem writes in RAM, a low-RAM
+board (Pi Zero 2 W has 512MB) can theoretically exhaust memory after enough
+uptime if logs or other rootfs writes accumulate unchecked, leaving the node
+hung with no automatic recovery. The image now pairs OverlayFS with several
+safeguards:
+
+- a Raspberry Pi hardware watchdog (`dtparam=watchdog=on`) plus
+  `RuntimeWatchdogSec=30s` for systemd, so a fully hung system is
+  automatically power-cycled instead of staying dead
+- a capped, volatile-storage journald configuration
+  (`Storage=volatile`, `RuntimeMaxUse=16M`) so logs cannot grow unbounded
+  inside the RAM-backed overlay
+- `zram-tools`-based compressed swap (25% of RAM) to give the OOM killer
+  headroom before it needs to kill critical processes
+- `strom-agent.service` now restarts unconditionally
+  (`Restart=always`, `StartLimitIntervalSec=0`) so a crash-loop can never
+  permanently latch the unit into a `failed` state
+
+These are OS-level and package-level changes applied at image-build time (or
+via `deploy/install.sh`), not something the agent's signed OTA update
+mechanism can retrofit — it only replaces the agent binary. An
+already-deployed node only gets these protections by reflashing with a
+current image, or by an operator re-running `deploy/install.sh` over SSH.
+
 ## Local Validation
 
 When working on the image pipeline or Pi provisioning flow, the current validation sequence is:

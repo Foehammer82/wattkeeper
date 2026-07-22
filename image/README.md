@@ -65,6 +65,8 @@ On later boots, `strom-agent` does not wait for WiFi to become online before it 
 
 Images built before this change may have enabled Raspberry Pi OverlayFS without the `strom-state` partition. To restore persistence on an existing node until it can be reflashed, run `sudo raspi-config nonint do_overlayfs 1`, reboot, and confirm `findmnt -n -o FSTYPE /` no longer reports `overlay`. Set the local admin password again afterward. If the node had been adopted before the power loss, re-adopt it because its on-node controller trust material may also have been lost.
 
+The image also pairs OverlayFS with a hardware watchdog, a capped volatile journald configuration, and zram-backed swap so a node that exhausts RAM after long uptime auto-recovers instead of hanging indefinitely; see [docs/reference/image.md](../docs/reference/image.md#ram-oom-hang-protection) for details.
+
 ## Security Constraints
 
 - No WiFi credentials are baked into the image.

@@ -6,8 +6,9 @@ RequiresMountsFor=/var/lib/strom
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/strom-agent --config-dir /etc/nut --listen :80
-Restart=on-failure
+Restart=always
 RestartSec=5s
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

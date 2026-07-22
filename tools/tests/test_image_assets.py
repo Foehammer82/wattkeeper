@@ -10,6 +10,10 @@ IMAGE_CONFIG = ROOT / "image" / "config"
 IMAGE_BUILD = ROOT / "image" / "build.sh"
 EXPORT_PRERUN = ROOT / "image" / "stage-strom" / "export-image" / "prerun.sh"
 AGENT_SERVICE = ROOT / "deploy" / "strom-agent.service"
+BOOT_CONFIG_STAGE = ROOT / "image" / "stage-strom" / "02-boot-config" / "00-run.sh"
+PACKAGES_LIST = ROOT / "image" / "stage-strom" / "00-packages" / "00-packages"
+RELIABILITY_STAGE = ROOT / "image" / "stage-strom" / "04-reliability" / "00-run.sh"
+INSTALL_SH = ROOT / "deploy" / "install.sh"
 
 
 def test_firstboot_enables_overlayfs_after_mounting_persistent_state() -> None:
@@ -58,3 +62,46 @@ def test_agent_starts_without_waiting_for_network_online() -> None:
     assert "After=network.target nut-server.service strom-firstboot.service" in service
     assert "network-online.target" not in service
     assert "RequiresMountsFor=/var/lib/strom" in service
+
+
+def test_agent_service_restarts_unconditionally_after_crash_loops() -> None:
+    service = AGENT_SERVICE.read_text(encoding="utf-8")
+
+    assert "Restart=always" in service
+    assert "StartLimitIntervalSec=0" in service
+
+
+def test_boot_config_enables_hardware_watchdog() -> None:
+    stage = BOOT_CONFIG_STAGE.read_text(encoding="utf-8")
+
+    assert "dtparam=watchdog=on" in stage
+
+
+def test_packages_list_includes_zram_tools() -> None:
+    packages = PACKAGES_LIST.read_text(encoding="utf-8")
+
+    assert "zram-tools" in packages.splitlines()
+
+
+def test_reliability_stage_installs_watchdog_journald_and_zram_config() -> None:
+    stage = RELIABILITY_STAGE.read_text(encoding="utf-8")
+
+    assert 'files/etc/systemd/system.conf.d/strom-watchdog.conf "${ROOTFS_DIR}/etc/systemd/system.conf.d/strom-watchdog.conf"' in stage
+    assert 'files/etc/systemd/journald.conf.d/strom-journald.conf "${ROOTFS_DIR}/etc/systemd/journald.conf.d/strom-journald.conf"' in stage
+    assert 'files/etc/default/zramswap "${ROOTFS_DIR}/etc/default/zramswap"' in stage
+
+
+def test_build_injects_reliability_config_from_deploy() -> None:
+    build = IMAGE_BUILD.read_text(encoding="utf-8")
+
+    assert 'install -D -m 0644 "$REPO_ROOT/deploy/strom-watchdog.conf" "$STAGE_DIR/04-reliability/files/etc/systemd/system.conf.d/strom-watchdog.conf"' in build
+    assert 'install -D -m 0644 "$REPO_ROOT/deploy/strom-journald.conf" "$STAGE_DIR/04-reliability/files/etc/systemd/journald.conf.d/strom-journald.conf"' in build
+    assert 'install -D -m 0644 "$REPO_ROOT/deploy/strom-zramswap.conf" "$STAGE_DIR/04-reliability/files/etc/default/zramswap"' in build
+
+
+def test_install_sh_applies_reliability_config_for_manual_deploys() -> None:
+    install = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'install -m 0644 "$SCRIPT_DIR/strom-watchdog.conf" /etc/systemd/system.conf.d/strom-watchdog.conf' in install
+    assert 'install -m 0644 "$SCRIPT_DIR/strom-journald.conf" /etc/systemd/journald.conf.d/strom-journald.conf' in install
+    assert 'install -m 0644 "$SCRIPT_DIR/strom-zramswap.conf" /etc/default/zramswap' in install

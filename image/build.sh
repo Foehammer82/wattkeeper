@@ -180,6 +180,9 @@ install -D -m 0644 "$REPO_ROOT/deploy/strom-agent.service" "$STAGE_DIR/01-agent/
 install -D -m 0644 "$REPO_ROOT/deploy/strom-update-check.service" "$STAGE_DIR/01-agent/files/etc/systemd/system/strom-update-check.service"
 install -D -m 0644 "$REPO_ROOT/deploy/strom-update-check.timer" "$STAGE_DIR/01-agent/files/etc/systemd/system/strom-update-check.timer"
 install -D -m 0644 "$REPO_ROOT/deploy/99-strom-agent.rules" "$STAGE_DIR/01-agent/files/etc/udev/rules.d/99-strom-agent.rules"
+install -D -m 0644 "$REPO_ROOT/deploy/strom-watchdog.conf" "$STAGE_DIR/04-reliability/files/etc/systemd/system.conf.d/strom-watchdog.conf"
+install -D -m 0644 "$REPO_ROOT/deploy/strom-journald.conf" "$STAGE_DIR/04-reliability/files/etc/systemd/journald.conf.d/strom-journald.conf"
+install -D -m 0644 "$REPO_ROOT/deploy/strom-zramswap.conf" "$STAGE_DIR/04-reliability/files/etc/default/zramswap"
 
 touch "$PI_GEN_DIR/stage2/SKIP_IMAGES"
 
